@@ -9,9 +9,11 @@ import (
 	"time"
 
 	"github.com/charmbracelet/bubbles/textarea"
+	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/glamour"
 	"github.com/charmbracelet/lipgloss"
+	xansi "github.com/charmbracelet/x/ansi"
 
 	"github.com/itwanger/paicli-go/internal/agent"
 )
@@ -33,6 +35,7 @@ type model struct {
 	agent          *agent.Agent
 	startup        Startup
 	input          textarea.Model
+	transcriptView viewport.Model
 	width          int
 	height         int
 	entries        []entry
@@ -74,7 +77,7 @@ type streamClosedMsg struct{}
 
 func Run(ctx context.Context, ag *agent.Agent, startup Startup) error {
 	m := newModel(ctx, ag, startup)
-	p := tea.NewProgram(m, tea.WithAltScreen(), tea.WithOutput(os.Stdout))
+	p := tea.NewProgram(m, tea.WithAltScreen(), tea.WithMouseCellMotion(), tea.WithOutput(os.Stdout))
 	_, err := p.Run()
 	return err
 }
@@ -97,27 +100,33 @@ func newModel(ctx context.Context, ag *agent.Agent, startup Startup) model {
 	input.SetWidth(80)
 	input.SetHeight(1)
 	input.Focus()
+	transcriptView := viewport.New(79, 20)
+	transcriptView.MouseWheelEnabled = true
+	transcriptView.MouseWheelDelta = 3
 	renderer, _ := newMarkdownRenderer(100)
-	return model{
-		ctx:      ctx,
-		agent:    ag,
-		startup:  startup,
-		input:    input,
-		width:    100,
-		height:   30,
-		mode:     "YOLO",
-		status:   "idle",
-		renderer: renderer,
+	m := model{
+		ctx:            ctx,
+		agent:          ag,
+		startup:        startup,
+		input:          input,
+		transcriptView: transcriptView,
+		width:          100,
+		height:         30,
+		mode:           "YOLO",
+		status:         "idle",
+		renderer:       renderer,
 		entries: []entry{{
 			Role:    "assistant",
 			Content: "你好！我是 PaiCLI Go，可以帮你处理代码、工具调用、搜索、MCP、Skill、RAG 和多 Agent 任务。",
 			Time:    time.Now(),
 		}},
 	}
+	m.syncTranscriptViewport(true)
+	return m
 }
 
 func (m model) Init() tea.Cmd {
-	return tea.ShowCursor
+	return tea.Batch(tea.HideCursor, m.input.Focus())
 }
 
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -128,10 +137,14 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.height = msg.Height
 		m.updateInputLayout()
 		if m.renderer != nil {
-			m.renderer, _ = newMarkdownRenderer(max(40, msg.Width-4))
+			m.renderer, _ = newMarkdownRenderer(max(40, msg.Width-scrollbarWidth-4))
 		}
+		m.syncTranscriptViewport(m.transcriptView.AtBottom())
 	case tea.KeyMsg:
 		if isTerminalControlResponse(msg) {
+			return m, nil
+		}
+		if handled := m.handleTranscriptScrollKey(msg); handled {
 			return m, nil
 		}
 		switch msg.String() {
@@ -161,14 +174,21 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.status = "running"
 			m.answerDraft = ""
 			m.resetThinkingBuffer()
+			m.syncTranscriptViewport(true)
 			stream := make(chan tea.Msg, 256)
 			m.stream = stream
 			return m, tea.Batch(m.runPrompt(text, stream), waitForStream(stream))
 		}
+	case tea.MouseMsg:
+		m.transcriptView, cmd = m.transcriptView.Update(msg)
+		return m, cmd
 	case streamEventMsg:
+		wasAtBottom := m.transcriptView.AtBottom()
 		m.applyStreamEvent(msg.Event)
+		m.syncTranscriptViewport(wasAtBottom)
 		return m, waitForStream(m.stream)
 	case streamDoneMsg:
+		wasAtBottom := m.transcriptView.AtBottom()
 		m.running = false
 		m.status = "idle"
 		m.stream = nil
@@ -184,11 +204,13 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.entries = append(m.entries, entry{Role: "assistant", Content: answer, Time: time.Now()})
 		}
 		m.answerDraft = ""
+		m.syncTranscriptViewport(wasAtBottom)
 		return m, nil
 	case streamClosedMsg:
 		m.stream = nil
 		return m, nil
 	case answerMsg:
+		wasAtBottom := m.transcriptView.AtBottom()
 		m.running = false
 		m.status = "idle"
 		m.resetThinkingBuffer()
@@ -210,10 +232,12 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			answerEntry := entry{Role: "assistant", Content: msg.Answer, Time: time.Now()}
 			m.entries = append(m.entries, answerEntry)
 		}
+		m.syncTranscriptViewport(wasAtBottom)
 	}
 	m.input, cmd = m.input.Update(msg)
 	m.sanitizeInput()
 	m.updateInputLayout()
+	m.syncTranscriptViewport(m.transcriptView.AtBottom())
 	return m, cmd
 }
 
@@ -265,27 +289,116 @@ func (m model) View() string {
 	input := m.inputBox()
 	status := m.statusBar()
 	banner := m.banner()
-	transcript := m.transcript()
 	height := max(8, m.height)
-	fixedHeight := lipgloss.Height(banner) + lipgloss.Height(input) + lipgloss.Height(status) + 2
-	transcriptHeight := max(0, height-fixedHeight)
-	if transcriptHeight > 0 {
-		transcript = tailLines(transcript, transcriptHeight)
-	} else {
-		transcript = ""
-	}
-
-	sections := []string{banner}
-	if strings.TrimSpace(transcript) != "" {
-		sections = append(sections, transcript)
-	}
-	sections = append(sections, input, status)
-	view := strings.Join(sections, "\n")
-	viewHeight := lipgloss.Height(view)
-	if viewHeight < height {
-		view += strings.Repeat("\n", height-viewHeight)
+	transcriptHeight := m.transcriptHeight(banner, input, status, height)
+	transcript := m.renderTranscriptViewport(transcriptHeight)
+	view := renderFrame(banner, transcript, input, status)
+	if delta := height - lipgloss.Height(view); delta != 0 {
+		transcriptHeight = max(1, transcriptHeight+delta)
+		transcript = m.renderTranscriptViewport(transcriptHeight)
+		view = renderFrame(banner, transcript, input, status)
 	}
 	return view
+}
+
+func renderFrame(banner, transcript, input, status string) string {
+	return strings.Join([]string{banner, transcript, input, status}, "\n")
+}
+
+func (m model) transcriptHeight(banner, input, status string, terminalHeight int) int {
+	fixedHeight := lipgloss.Height(banner) + lipgloss.Height(input) + lipgloss.Height(status) + 3
+	return max(1, terminalHeight-fixedHeight)
+}
+
+func (m *model) syncTranscriptViewport(stickToBottom bool) {
+	banner := m.banner()
+	input := m.inputBox()
+	status := m.statusBar()
+	height := m.transcriptHeight(banner, input, status, max(8, m.height))
+	width := max(1, max(40, m.width)-scrollbarWidth)
+	m.transcriptView.Width = width
+	m.transcriptView.Height = height
+	m.transcriptView.SetContent(m.transcript())
+	if stickToBottom {
+		m.transcriptView.GotoBottom()
+	} else if m.transcriptView.PastBottom() {
+		m.transcriptView.GotoBottom()
+	}
+}
+
+func (m model) renderTranscriptViewport(height int) string {
+	view := m.transcriptView
+	view.Width = max(1, max(40, m.width)-scrollbarWidth)
+	view.Height = max(1, height)
+	view.SetContent(m.transcript())
+	return appendScrollbar(view.View(), m.scrollbar(view))
+}
+
+func (m model) scrollbar(view viewport.Model) []string {
+	height := max(1, view.Height)
+	total := view.TotalLineCount()
+	if total <= height {
+		return blankScrollbar(height)
+	}
+	thumbHeight := max(1, height*height/total)
+	if thumbHeight > height {
+		thumbHeight = height
+	}
+	maxTop := max(0, height-thumbHeight)
+	thumbTop := int(view.ScrollPercent()*float64(maxTop) + 0.5)
+	out := make([]string, height)
+	for i := range out {
+		if i >= thumbTop && i < thumbTop+thumbHeight {
+			out[i] = scrollbarThumbStyle.Render("█")
+		} else {
+			out[i] = scrollbarTrackStyle.Render("│")
+		}
+	}
+	return out
+}
+
+func blankScrollbar(height int) []string {
+	out := make([]string, height)
+	for i := range out {
+		out[i] = " "
+	}
+	return out
+}
+
+func appendScrollbar(view string, bar []string) string {
+	lines := strings.Split(view, "\n")
+	if strings.HasSuffix(view, "\n") && len(lines) > 0 {
+		lines = lines[:len(lines)-1]
+	}
+	height := len(bar)
+	if height == 0 {
+		height = len(lines)
+	}
+	for len(lines) < height {
+		lines = append(lines, "")
+	}
+	if len(lines) > height {
+		lines = lines[:height]
+	}
+	for len(bar) < height {
+		bar = append(bar, " ")
+	}
+	for i := range lines {
+		lines[i] += bar[i]
+	}
+	return strings.Join(lines, "\n")
+}
+
+func (m *model) handleTranscriptScrollKey(msg tea.KeyMsg) bool {
+	switch msg.String() {
+	case "pgup":
+		m.transcriptView.PageUp()
+	case "pgdown":
+		m.transcriptView.PageDown()
+	default:
+		return false
+	}
+	return true
 }
 
 func (m model) banner() string {
@@ -320,17 +433,36 @@ func (m *model) updateInputLayout() {
 
 func (m model) inputBox() string {
 	width := max(40, m.width)
-	lines := strings.Split(strings.TrimRight(m.input.View(), "\n"), "\n")
-	for i, line := range lines {
-		lines[i] = fillInputLine(width, line)
+	lines := make([]string, 0, inputPaddingTop+maxInputRows+inputPaddingBottom)
+	for range inputPaddingTop {
+		lines = append(lines, inputPaddingLine(width))
 	}
-	if len(lines) == 0 {
-		lines = []string{fillInputLine(width, "")}
+	if m.input.Value() == "" {
+		lines = append(lines, m.emptyInputLine(width))
+	} else {
+		contentLines := strings.Split(strings.TrimRight(m.input.View(), "\n"), "\n")
+		if len(contentLines) == 0 {
+			contentLines = []string{""}
+		}
+		lines = append(lines, contentLines...)
+	}
+	for range inputPaddingBottom {
+		lines = append(lines, inputPaddingLine(width))
 	}
 	return strings.Join(lines, "\n")
 }
 
-func fillInputLine(width int, content string) string {
+func inputPaddingLine(width int) string {
+	return inputFillStyle.Render(strings.Repeat(" ", width))
+}
+
+func (m model) emptyInputLine(width int) string {
+	prompt := inputPromptStyle.Render(inputPrompt)
+	cursor, rest := splitFirstRune(inputPlaceholder)
+	if cursor == "" {
+		cursor = " "
+	}
+	content := prompt + inputCursorStyle.Render(cursor) + inputPlaceholderStyle.Render(rest)
 	pad := max(0, width-lipgloss.Width(content))
 	return content + inputFillStyle.Render(strings.Repeat(" ", pad))
 }
@@ -370,17 +502,6 @@ func splitFirstRune(s string) (string, string) {
 	return "", ""
 }
 
-func tailLines(s string, maxLines int) string {
-	if maxLines <= 0 {
-		return ""
-	}
-	lines := strings.Split(s, "\n")
-	if len(lines) <= maxLines {
-		return s
-	}
-	return strings.Join(lines[len(lines)-maxLines:], "\n")
-}
-
 func inputRows(value string, width int) int {
 	if width <= 0 {
 		return 1
@@ -413,7 +534,8 @@ func isTerminalControlResponse(msg tea.KeyMsg) bool {
 	if len(msg.Runes) > 0 {
 		s += string(msg.Runes)
 	}
-	return strings.Contains(s, "]11;") ||
+	return terminalMouseResponseRE.MatchString(s) ||
+		strings.Contains(s, "]11;") ||
 		strings.Contains(s, "]10;") ||
 		strings.Contains(s, "]12;") ||
 		strings.Contains(s, "rgb:") ||
@@ -429,10 +551,14 @@ func (m *model) sanitizeInput() {
 	}
 }
 
-var terminalControlResponseRE = regexp.MustCompile(`(?s)(?:\x1b\]|\])?(?:10|11|12);rgb:[0-9a-fA-F]{1,4}/[0-9a-fA-F]{1,4}/[0-9a-fA-F]{1,4}(?:\x1b\\|\\)?`)
+var (
+	terminalControlResponseRE = regexp.MustCompile(`(?s)(?:\x1b\]|\])?(?:10|11|12);rgb:[0-9a-fA-F]{1,4}/[0-9a-fA-F]{1,4}/[0-9a-fA-F]{1,4}(?:\x1b\\|\\)?`)
+	terminalMouseResponseRE   = regexp.MustCompile(`(?:\x1b\[|\x9b|\[)?<\d{1,3};\d{1,4};\d{1,4}[mM]`)
+)
 
 func stripTerminalControlResponses(s string) string {
 	s = terminalControlResponseRE.ReplaceAllString(s, "")
+	s = terminalMouseResponseRE.ReplaceAllString(s, "")
 	s = strings.ReplaceAll(s, "]11;", "")
 	s = strings.ReplaceAll(s, "]10;", "")
 	s = strings.ReplaceAll(s, "]12;", "")
@@ -665,13 +791,32 @@ func (m model) statusBar() string {
 	if modelName != "" {
 		left += " " + modelStyle.Render(modelName)
 	}
-	right := m.contextStatus(ctxUsed, ctxMax) + " " + mutedStyle.Render(truncateMiddle(m.startup.CWD, max(18, width/3)))
+	rightMax := max(0, width-lipgloss.Width(left)-1)
+	right := m.statusRight(ctxUsed, ctxMax, rightMax)
 	gap := width - lipgloss.Width(left) - lipgloss.Width(right) - 1
 	if gap < 1 {
 		gap = 1
 	}
 	line := left + strings.Repeat(" ", gap) + right
-	return statusStyle.Width(width).Render(line)
+	if lipgloss.Width(line) > width {
+		line = xansi.Truncate(line, width, "")
+	}
+	return statusStyle.Render(line)
+}
+
+func (m model) statusRight(ctxUsed, ctxMax, width int) string {
+	if width <= 0 {
+		return ""
+	}
+	right := m.contextStatus(ctxUsed, ctxMax)
+	pathWidth := width - lipgloss.Width(right) - 1
+	if pathWidth >= 8 {
+		right += " " + mutedStyle.Render(truncateMiddle(m.startup.CWD, pathWidth))
+	}
+	if lipgloss.Width(right) > width {
+		return xansi.Truncate(right, width, "")
+	}
+	return right
 }
 
 func (m model) estimatedContextTokens() int {
@@ -809,9 +954,12 @@ CLI commands outside the TUI:
 }
 
 const (
-	inputPrompt      = "* "
-	inputPlaceholder = "Type your message or @path/to/file"
-	maxInputRows     = 4
+	inputPrompt        = "* "
+	inputPlaceholder   = "Type your message or @path/to/file"
+	inputPaddingTop    = 1
+	inputPaddingBottom = 1
+	maxInputRows       = 4
+	scrollbarWidth     = 1
 )
 
 var (
@@ -825,15 +973,20 @@ var (
 	assistantStyle        = lipgloss.NewStyle().Foreground(lipgloss.Color("252"))
 	errorStyle            = lipgloss.NewStyle().Foreground(lipgloss.Color("196")).Bold(true)
 	inputFillStyle        = lipgloss.NewStyle().Background(lipgloss.Color("236"))
+	inputCursorStyle      = lipgloss.NewStyle().Background(lipgloss.Color("15")).Foreground(lipgloss.Color("236"))
 	inputPromptStyle      = lipgloss.NewStyle().Background(lipgloss.Color("236")).Foreground(lipgloss.Color("252"))
 	inputTextStyle        = lipgloss.NewStyle().Background(lipgloss.Color("236")).Foreground(lipgloss.Color("252"))
 	inputPlaceholderStyle = lipgloss.NewStyle().
 				Background(lipgloss.Color("236")).
 				Foreground(lipgloss.Color("244"))
-	statusStyle        = lipgloss.NewStyle().BorderTop(true).BorderForeground(lipgloss.Color("238"))
-	modeStyle          = lipgloss.NewStyle().Foreground(lipgloss.Color("196")).Bold(true)
-	modelStyle         = lipgloss.NewStyle().Foreground(lipgloss.Color("245"))
-	okStyle            = lipgloss.NewStyle().Foreground(lipgloss.Color("42")).Bold(true)
+	statusStyle         = lipgloss.NewStyle()
+	modeStyle           = lipgloss.NewStyle().Foreground(lipgloss.Color("196")).Bold(true)
+	modelStyle          = lipgloss.NewStyle().Foreground(lipgloss.Color("245"))
+	okStyle             = lipgloss.NewStyle().Foreground(lipgloss.Color("42")).Bold(true)
+	scrollbarTrackStyle = lipgloss.NewStyle().
+				Foreground(lipgloss.Color("238"))
+	scrollbarThumbStyle = lipgloss.NewStyle().
+				Foreground(lipgloss.Color("39"))
 	thinkingStyle      = lipgloss.NewStyle().Foreground(lipgloss.Color("220")).Bold(true)
 	thinkingEntryStyle = lipgloss.NewStyle().
 				Border(lipgloss.NormalBorder(), false, false, false, true).

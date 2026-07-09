@@ -2,9 +2,11 @@ package tui
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"testing"
 
+	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/charmbracelet/x/ansi"
 
@@ -15,12 +17,42 @@ func TestStripTerminalControlResponses(t *testing.T) {
 	cases := map[string]string{
 		"]11;rgb:0000/0000/0000\\":              "",
 		"\x1b]11;rgb:0000/0000/0000\x1b\\hello": "hello",
+		"\x1b[<65;19;29M":                       "",
+		"[<65;19;29M<65;19;29M":                 "",
+		"hello\x1b[<65;19;29M world":            "hello world",
 		"normal text":                           "normal text",
 	}
 	for input, want := range cases {
 		if got := stripTerminalControlResponses(input); got != want {
 			t.Fatalf("stripTerminalControlResponses(%q) = %q, want %q", input, got, want)
 		}
+	}
+}
+
+func TestMouseEscapeKeyMsgDoesNotEnterInput(t *testing.T) {
+	m := newModel(context.Background(), nil, Startup{})
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("[<65;19;29M")})
+	got := updated.(model)
+	if got.input.Value() != "" {
+		t.Fatalf("mouse escape sequence should not enter input, got %q", got.input.Value())
+	}
+}
+
+func TestMouseWheelScrollsTranscriptAndDoesNotEnterInput(t *testing.T) {
+	m := overflowingTranscriptModel()
+	before := m.transcriptView.YOffset
+
+	updated, _ := m.Update(tea.MouseMsg{
+		Button: tea.MouseButtonWheelUp,
+		Action: tea.MouseActionPress,
+		Type:   tea.MouseWheelUp,
+	})
+	got := updated.(model)
+	if got.transcriptView.YOffset >= before {
+		t.Fatalf("mouse wheel should scroll transcript upward: before=%d after=%d", before, got.transcriptView.YOffset)
+	}
+	if got.input.Value() != "" {
+		t.Fatalf("mouse wheel should not enter input, got %q", got.input.Value())
 	}
 }
 
@@ -47,6 +79,24 @@ func TestContextStatusUsesMillionWindowAndGreyEmptyProgress(t *testing.T) {
 	}
 	if progressEmptyStyle.GetBackground() != lipgloss.Color("236") {
 		t.Fatalf("empty progress area should use grey background")
+	}
+}
+
+func TestStatusBarStaysSingleLine(t *testing.T) {
+	for _, width := range []int{40, 80, 160} {
+		m := newModel(context.Background(), nil, Startup{
+			Model:      "deepseek-v4-pro",
+			CWD:        "/Users/itwanger/Documents/GitHub/paicli-go",
+			MaxContext: 1000000,
+		})
+		m.width = width
+		got := m.statusBar()
+		if h := lipgloss.Height(got); h != 1 {
+			t.Fatalf("status bar height at width %d = %d, want 1:\n%s", width, h, ansi.Strip(got))
+		}
+		if w := lipgloss.Width(got); w > width {
+			t.Fatalf("status bar width at width %d = %d, want <= %d:\n%s", width, w, width, ansi.Strip(got))
+		}
 	}
 }
 
@@ -88,11 +138,35 @@ func TestInputBoxUsesFullWidth(t *testing.T) {
 	}
 	plain := ansi.Strip(got)
 	lines := strings.Split(plain, "\n")
-	if len(lines) != 1 {
-		t.Fatalf("input box rows = %d, want 1: %q", len(lines), plain)
+	if len(lines) != inputPaddingTop+1+inputPaddingBottom {
+		t.Fatalf("input box rows = %d, want %d: %q", len(lines), inputPaddingTop+1+inputPaddingBottom, plain)
 	}
-	if !strings.HasPrefix(lines[0], inputPrompt+inputPlaceholder) {
-		t.Fatalf("input should render textarea prompt and placeholder, got %q", lines[0])
+	for i := 0; i < inputPaddingTop; i++ {
+		if strings.TrimSpace(lines[i]) != "" {
+			t.Fatalf("top input padding row should be blank, got %q", lines[i])
+		}
+	}
+	contentLine := lines[inputPaddingTop]
+	if !strings.HasPrefix(contentLine, inputPrompt+inputPlaceholder) {
+		t.Fatalf("input should render textarea prompt and placeholder, got %q", contentLine)
+	}
+	for i := len(lines) - inputPaddingBottom; i < len(lines); i++ {
+		if strings.TrimSpace(lines[i]) != "" {
+			t.Fatalf("bottom input padding row should be blank, got %q", lines[i])
+		}
+	}
+
+	m.input.SetValue("1")
+	m.updateInputLayout()
+	got = m.inputBox()
+	if lipglossWidth := printableWidth(got); lipglossWidth != 80 {
+		t.Fatalf("input box with value width = %d, want 80", lipglossWidth)
+	}
+	plain = ansi.Strip(got)
+	lines = strings.Split(plain, "\n")
+	contentLine = lines[inputPaddingTop]
+	if !strings.HasPrefix(contentLine, inputPrompt+"1") {
+		t.Fatalf("input should render typed value with textarea prompt, got %q", plain)
 	}
 }
 
@@ -109,11 +183,69 @@ func TestViewKeepsInputInsideTerminalFrame(t *testing.T) {
 	if !strings.Contains(plain, inputPrompt+inputPlaceholder+"\n") {
 		t.Fatalf("input should stay in the fixed TUI frame, got:\n%s", plain)
 	}
+	lines := strings.Split(plain, "\n")
+	if last := strings.TrimSpace(lines[len(lines)-1]); !strings.HasPrefix(last, "YOLO DeepSeek V4 Pro") {
+		t.Fatalf("status bar should be pinned to the last terminal row, got last line %q:\n%s", last, plain)
+	}
+	if count := strings.Count(plain, "YOLO DeepSeek V4 Pro"); count != 1 {
+		t.Fatalf("status bar should render once, got %d occurrences:\n%s", count, plain)
+	}
 	for _, want := range []string{"PaiCLI", "DeepSeek V4 Pro", "What's ready", "PaiCLI Go，可以帮你"} {
 		if !strings.Contains(plain, want) {
 			t.Fatalf("view should contain %q, got:\n%s", want, plain)
 		}
 	}
+}
+
+func TestTranscriptViewportScrollsToPreviousOutput(t *testing.T) {
+	m := overflowingTranscriptModel()
+
+	if !m.transcriptView.AtBottom() {
+		t.Fatalf("transcript should start at bottom")
+	}
+	if m.transcriptView.TotalLineCount() <= m.transcriptView.Height {
+		t.Fatalf("test setup should overflow viewport: total=%d height=%d", m.transcriptView.TotalLineCount(), m.transcriptView.Height)
+	}
+	bottomOffset := m.transcriptView.YOffset
+	bottomView := ansi.Strip(m.renderTranscriptViewport(m.transcriptView.Height))
+	if strings.Contains(bottomView, "line 01") {
+		t.Fatalf("bottom view should not show oldest output before scrolling:\n%s", bottomView)
+	}
+
+	for !m.transcriptView.AtTop() {
+		if !m.handleTranscriptScrollKey(tea.KeyMsg{Type: tea.KeyPgUp}) {
+			t.Fatalf("page up should be handled by transcript viewport")
+		}
+	}
+	if m.transcriptView.YOffset >= bottomOffset {
+		t.Fatalf("page up should move viewport upward: before=%d after=%d", bottomOffset, m.transcriptView.YOffset)
+	}
+	scrolledView := ansi.Strip(m.renderTranscriptViewport(m.transcriptView.Height))
+	if !strings.Contains(scrolledView, "line 01") {
+		t.Fatalf("scrolled view should reveal previous output:\n%s", scrolledView)
+	}
+}
+
+func TestTranscriptScrollbarAppearsWhenContentOverflows(t *testing.T) {
+	m := overflowingTranscriptModel()
+
+	bar := ansi.Strip(strings.Join(m.scrollbar(m.transcriptView), ""))
+	if !strings.Contains(bar, "█") || !strings.Contains(bar, "│") {
+		t.Fatalf("overflowing transcript should render scrollbar track and thumb, got %q", bar)
+	}
+}
+
+func overflowingTranscriptModel() model {
+	m := newModel(context.Background(), nil, Startup{Model: "deepseek-v4-pro"})
+	m.width = 80
+	m.height = 15
+	m.renderer = nil
+	m.entries = nil
+	for i := 1; i <= 6; i++ {
+		m.entries = append(m.entries, entry{Role: "assistant", Content: fmt.Sprintf("line %02d", i)})
+	}
+	m.syncTranscriptViewport(true)
+	return m
 }
 
 func TestDisplayModelName(t *testing.T) {
