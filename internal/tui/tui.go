@@ -1,0 +1,864 @@
+package tui
+
+import (
+	"context"
+	"fmt"
+	"os"
+	"regexp"
+	"strings"
+	"time"
+
+	"github.com/charmbracelet/bubbles/textarea"
+	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/glamour"
+	"github.com/charmbracelet/lipgloss"
+
+	"github.com/itwanger/paicli-go/internal/agent"
+)
+
+type Startup struct {
+	Version       string
+	Provider      string
+	Model         string
+	CWD           string
+	SkillsEnabled int
+	SkillsTotal   int
+	MCPReady      int
+	MCPTools      int
+	MaxContext    int
+}
+
+type model struct {
+	ctx            context.Context
+	agent          *agent.Agent
+	startup        Startup
+	input          textarea.Model
+	width          int
+	height         int
+	entries        []entry
+	running        bool
+	mode           string
+	status         string
+	err            error
+	renderer       *glamour.TermRenderer
+	stream         <-chan tea.Msg
+	answerDraft    string
+	thinkingTitle  string
+	thinkingLine   string
+	thinkingHeader bool
+}
+
+type entry struct {
+	Role    string
+	Content string
+	Time    time.Time
+}
+
+type answerMsg struct {
+	Prompt string
+	Answer string
+	Events []agent.Event
+	Err    error
+}
+
+type streamEventMsg struct {
+	Event agent.Event
+}
+
+type streamDoneMsg struct {
+	Answer string
+	Err    error
+}
+
+type streamClosedMsg struct{}
+
+func Run(ctx context.Context, ag *agent.Agent, startup Startup) error {
+	m := newModel(ctx, ag, startup)
+	p := tea.NewProgram(m, tea.WithAltScreen(), tea.WithOutput(os.Stdout))
+	_, err := p.Run()
+	return err
+}
+
+func newModel(ctx context.Context, ag *agent.Agent, startup Startup) model {
+	input := textarea.New()
+	input.Placeholder = inputPlaceholder
+	input.Prompt = inputPrompt
+	input.ShowLineNumbers = false
+	input.EndOfBufferCharacter = ' '
+	input.CharLimit = 20000
+	input.MaxHeight = maxInputRows
+	input.MaxWidth = 0
+	input.FocusedStyle.Base = inputFillStyle
+	input.FocusedStyle.CursorLine = inputFillStyle
+	input.FocusedStyle.Prompt = inputPromptStyle
+	input.FocusedStyle.Placeholder = inputPlaceholderStyle
+	input.FocusedStyle.Text = inputTextStyle
+	input.FocusedStyle.EndOfBuffer = inputFillStyle
+	input.SetWidth(80)
+	input.SetHeight(1)
+	input.Focus()
+	renderer, _ := newMarkdownRenderer(100)
+	return model{
+		ctx:      ctx,
+		agent:    ag,
+		startup:  startup,
+		input:    input,
+		width:    100,
+		height:   30,
+		mode:     "YOLO",
+		status:   "idle",
+		renderer: renderer,
+		entries: []entry{{
+			Role:    "assistant",
+			Content: "你好！我是 PaiCLI Go，可以帮你处理代码、工具调用、搜索、MCP、Skill、RAG 和多 Agent 任务。",
+			Time:    time.Now(),
+		}},
+	}
+}
+
+func (m model) Init() tea.Cmd {
+	return tea.ShowCursor
+}
+
+func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	var cmd tea.Cmd
+	switch msg := msg.(type) {
+	case tea.WindowSizeMsg:
+		m.width = msg.Width
+		m.height = msg.Height
+		m.updateInputLayout()
+		if m.renderer != nil {
+			m.renderer, _ = newMarkdownRenderer(max(40, msg.Width-4))
+		}
+	case tea.KeyMsg:
+		if isTerminalControlResponse(msg) {
+			return m, nil
+		}
+		switch msg.String() {
+		case "ctrl+c", "esc":
+			if m.running {
+				m.status = "cancel requested"
+				return m, nil
+			}
+			return m, tea.Quit
+		case "ctrl+d":
+			return m, tea.Quit
+		case "enter":
+			if m.running {
+				return m, nil
+			}
+			text := strings.TrimSpace(m.input.Value())
+			if text == "" {
+				return m, nil
+			}
+			if text == "/exit" || text == "/quit" {
+				return m, tea.Quit
+			}
+			m.input.Reset()
+			userEntry := entry{Role: "user", Content: text, Time: time.Now()}
+			m.entries = append(m.entries, userEntry)
+			m.running = true
+			m.status = "running"
+			m.answerDraft = ""
+			m.resetThinkingBuffer()
+			stream := make(chan tea.Msg, 256)
+			m.stream = stream
+			return m, tea.Batch(m.runPrompt(text, stream), waitForStream(stream))
+		}
+	case streamEventMsg:
+		m.applyStreamEvent(msg.Event)
+		return m, waitForStream(m.stream)
+	case streamDoneMsg:
+		m.running = false
+		m.status = "idle"
+		m.stream = nil
+		m.resetThinkingBuffer()
+		answer := msg.Answer
+		if strings.TrimSpace(answer) == "" {
+			answer = m.answerDraft
+		}
+		if msg.Err != nil {
+			errorEntry := entry{Role: "error", Content: msg.Err.Error(), Time: time.Now()}
+			m.entries = append(m.entries, errorEntry)
+		} else if strings.TrimSpace(answer) != "" {
+			m.entries = append(m.entries, entry{Role: "assistant", Content: answer, Time: time.Now()})
+		}
+		m.answerDraft = ""
+		return m, nil
+	case streamClosedMsg:
+		m.stream = nil
+		return m, nil
+	case answerMsg:
+		m.running = false
+		m.status = "idle"
+		m.resetThinkingBuffer()
+		for _, ev := range msg.Events {
+			if strings.TrimSpace(ev.Content) == "" {
+				continue
+			}
+			eventEntry := entry{
+				Role:    string(ev.Type),
+				Content: formatEventContent(ev),
+				Time:    time.Now(),
+			}
+			m.entries = append(m.entries, eventEntry)
+		}
+		if msg.Err != nil {
+			errorEntry := entry{Role: "error", Content: msg.Err.Error(), Time: time.Now()}
+			m.entries = append(m.entries, errorEntry)
+		} else if strings.TrimSpace(msg.Answer) != "" {
+			answerEntry := entry{Role: "assistant", Content: msg.Answer, Time: time.Now()}
+			m.entries = append(m.entries, answerEntry)
+		}
+	}
+	m.input, cmd = m.input.Update(msg)
+	m.sanitizeInput()
+	m.updateInputLayout()
+	return m, cmd
+}
+
+func (m model) runPrompt(text string, stream chan<- tea.Msg) tea.Cmd {
+	return func() tea.Msg {
+		var (
+			answer string
+			err    error
+		)
+		defer close(stream)
+		send := func(msg tea.Msg) {
+			select {
+			case stream <- msg:
+			case <-m.ctx.Done():
+			}
+		}
+		observe := func(event agent.Event) {
+			send(streamEventMsg{Event: event})
+		}
+		switch {
+		case strings.HasPrefix(text, "/plan "):
+			answer, err = m.agent.PlanAndExecuteWithObserver(m.ctx, strings.TrimSpace(strings.TrimPrefix(text, "/plan ")), observe)
+		case strings.HasPrefix(text, "/team "):
+			answer, err = m.agent.Team(m.ctx, strings.TrimSpace(strings.TrimPrefix(text, "/team ")))
+		case text == "/help" || text == "/":
+			answer = slashHelp()
+		default:
+			answer, err = m.agent.RunWithObserver(m.ctx, text, observe)
+		}
+		send(streamDoneMsg{Answer: answer, Err: err})
+		return nil
+	}
+}
+
+func waitForStream(stream <-chan tea.Msg) tea.Cmd {
+	return func() tea.Msg {
+		if stream == nil {
+			return streamClosedMsg{}
+		}
+		msg, ok := <-stream
+		if !ok {
+			return streamClosedMsg{}
+		}
+		return msg
+	}
+}
+
+func (m model) View() string {
+	input := m.inputBox()
+	status := m.statusBar()
+	banner := m.banner()
+	transcript := m.transcript()
+	height := max(8, m.height)
+	fixedHeight := lipgloss.Height(banner) + lipgloss.Height(input) + lipgloss.Height(status) + 2
+	transcriptHeight := max(0, height-fixedHeight)
+	if transcriptHeight > 0 {
+		transcript = tailLines(transcript, transcriptHeight)
+	} else {
+		transcript = ""
+	}
+
+	sections := []string{banner}
+	if strings.TrimSpace(transcript) != "" {
+		sections = append(sections, transcript)
+	}
+	sections = append(sections, input, status)
+	view := strings.Join(sections, "\n")
+	viewHeight := lipgloss.Height(view)
+	if viewHeight < height {
+		view += strings.Repeat("\n", height-viewHeight)
+	}
+	return view
+}
+
+func (m model) banner() string {
+	left := logoStyle.Render(strings.Join([]string{
+		"██████████",
+		"  ██  ██  ",
+		"  ██  ██  ",
+		"  ██  ██  ",
+		"  ██  ██  ",
+	}, "\n"))
+	info := lipgloss.JoinVertical(lipgloss.Left,
+		titleStyle.Render("PaiCLI π")+" "+mutedStyle.Render(m.startup.Version),
+		mutedStyle.Render(displayModelName(m.startup.Model)),
+		boldStyle.Render("MCP")+" "+mutedStyle.Render(fmt.Sprintf("%d ready · %d tools", m.startup.MCPReady, m.startup.MCPTools)),
+		boldStyle.Render("Skill")+" "+mutedStyle.Render(fmt.Sprintf("%d/%d enabled", m.startup.SkillsEnabled, m.startup.SkillsTotal)),
+	)
+	panelWidth := max(40, m.width-lipgloss.Width(left)-lipgloss.Width(info)-8)
+	panel := panelStyle.Width(panelWidth).Render(
+		sectionStyle.Render("What's ready") + "\n" +
+			"- ReAct · Plan · Multi-Agent\n" +
+			"- grep · RAG · Web · MCP · Skill\n" +
+			"- Runtime · Snapshot · WeChat")
+	return lipgloss.JoinHorizontal(lipgloss.Top, left, "  ", info, "  ", panel)
+}
+
+func (m *model) updateInputLayout() {
+	width := max(40, m.width)
+	contentWidth := max(1, width-lipgloss.Width(inputPrompt))
+	m.input.SetWidth(width)
+	m.input.SetHeight(inputRows(m.input.Value(), contentWidth))
+}
+
+func (m model) inputBox() string {
+	width := max(40, m.width)
+	lines := strings.Split(strings.TrimRight(m.input.View(), "\n"), "\n")
+	for i, line := range lines {
+		lines[i] = fillInputLine(width, line)
+	}
+	if len(lines) == 0 {
+		lines = []string{fillInputLine(width, "")}
+	}
+	return strings.Join(lines, "\n")
+}
+
+func fillInputLine(width int, content string) string {
+	pad := max(0, width-lipgloss.Width(content))
+	return content + inputFillStyle.Render(strings.Repeat(" ", pad))
+}
+
+func splitAtVisualColumn(s string, col int) (string, string, string) {
+	if col <= 0 {
+		under, after := splitFirstRune(s)
+		return "", under, after
+	}
+	var before strings.Builder
+	used := 0
+	for i, r := range s {
+		w := lipgloss.Width(string(r))
+		if used >= col {
+			under, after := splitFirstRune(s[i:])
+			return before.String(), under, after
+		}
+		if used+w > col {
+			return before.String(), "", s[i:]
+		}
+		before.WriteRune(r)
+		used += w
+	}
+	return before.String(), "", ""
+}
+
+func splitFirstRune(s string) (string, string) {
+	if s == "" {
+		return "", ""
+	}
+	for i, r := range s {
+		if i == 0 {
+			size := len(string(r))
+			return string(r), s[size:]
+		}
+	}
+	return "", ""
+}
+
+func tailLines(s string, maxLines int) string {
+	if maxLines <= 0 {
+		return ""
+	}
+	lines := strings.Split(s, "\n")
+	if len(lines) <= maxLines {
+		return s
+	}
+	return strings.Join(lines[len(lines)-maxLines:], "\n")
+}
+
+func inputRows(value string, width int) int {
+	if width <= 0 {
+		return 1
+	}
+	rows := 1
+	for _, line := range strings.Split(value, "\n") {
+		lineWidth := lipgloss.Width(line)
+		if lineWidth > 0 {
+			rows += lineWidth / width
+			if lineWidth%width == 0 {
+				rows--
+			}
+		}
+	}
+	if rows < 1 {
+		return 1
+	}
+	if rows > maxInputRows {
+		return maxInputRows
+	}
+	return rows
+}
+
+func newMarkdownRenderer(width int) (*glamour.TermRenderer, error) {
+	return glamour.NewTermRenderer(glamour.WithStandardStyle("dark"), glamour.WithWordWrap(width))
+}
+
+func isTerminalControlResponse(msg tea.KeyMsg) bool {
+	s := msg.String()
+	if len(msg.Runes) > 0 {
+		s += string(msg.Runes)
+	}
+	return strings.Contains(s, "]11;") ||
+		strings.Contains(s, "]10;") ||
+		strings.Contains(s, "]12;") ||
+		strings.Contains(s, "rgb:") ||
+		strings.Contains(s, "\x1b]") ||
+		strings.Contains(s, "\x9d")
+}
+
+func (m *model) sanitizeInput() {
+	value := m.input.Value()
+	clean := stripTerminalControlResponses(value)
+	if clean != value {
+		m.input.SetValue(clean)
+	}
+}
+
+var terminalControlResponseRE = regexp.MustCompile(`(?s)(?:\x1b\]|\])?(?:10|11|12);rgb:[0-9a-fA-F]{1,4}/[0-9a-fA-F]{1,4}/[0-9a-fA-F]{1,4}(?:\x1b\\|\\)?`)
+
+func stripTerminalControlResponses(s string) string {
+	s = terminalControlResponseRE.ReplaceAllString(s, "")
+	s = strings.ReplaceAll(s, "]11;", "")
+	s = strings.ReplaceAll(s, "]10;", "")
+	s = strings.ReplaceAll(s, "]12;", "")
+	return strings.TrimLeft(s, "\x1b\\] ")
+}
+
+func (m model) transcript() string {
+	var b strings.Builder
+	for i, e := range m.entries {
+		if i > 0 {
+			b.WriteString("\n\n")
+		}
+		b.WriteString(m.renderEntry(e))
+	}
+	return b.String()
+}
+
+func (m model) renderEntry(e entry) string {
+	switch e.Role {
+	case "user":
+		return userStyle.Width(max(40, m.width-2)).Render("> " + e.Content)
+	case "error":
+		return errorStyle.Render("Error: " + e.Content)
+	case string(agent.EventThinking):
+		return thinkingEntryStyle.Width(max(40, m.width-2)).Render(e.Content)
+	case string(agent.EventToolCall):
+		return toolCallEntryStyle.Width(max(40, m.width-2)).Render(e.Content)
+	case string(agent.EventToolResult):
+		return toolResultEntryStyle.Width(max(40, m.width-2)).Render(e.Content)
+	default:
+		content := e.Content
+		if m.renderer != nil {
+			if rendered, err := m.renderer.Render(content); err == nil {
+				content = strings.TrimRight(rendered, "\n")
+			}
+		}
+		return assistantStyle.Render(content)
+	}
+}
+
+func (m *model) applyStreamEvent(ev agent.Event) string {
+	switch ev.Type {
+	case agent.EventThinkingDelta:
+		title := strings.TrimSpace(ev.Title)
+		if title == "" {
+			title = "Thinking"
+		}
+		m.appendStreamDelta(string(agent.EventThinking), sectionStyle.Render(title)+"\n", ev.Content)
+		return m.appendThinkingLine(title, ev.Content)
+	case agent.EventAnswerDelta:
+		if strings.TrimSpace(ev.Content) == "" {
+			return ""
+		}
+		m.answerDraft += ev.Content
+		return ""
+	case agent.EventThinking, agent.EventToolCall, agent.EventToolResult:
+		if strings.TrimSpace(ev.Content) == "" {
+			return ""
+		}
+		outputs := compactOutputs(m.flushThinkingLine())
+		eventEntry := entry{
+			Role:    string(ev.Type),
+			Content: formatEventContent(ev),
+			Time:    time.Now(),
+		}
+		m.entries = append(m.entries, eventEntry)
+		outputs = append(outputs, m.renderEntry(eventEntry))
+		return strings.Join(outputs, "\n\n")
+	}
+	return ""
+}
+
+func (m *model) appendThinkingLine(title, delta string) string {
+	if strings.TrimSpace(delta) == "" {
+		return ""
+	}
+	var outputs []string
+	if m.thinkingTitle != "" && m.thinkingTitle != title {
+		outputs = append(outputs, m.flushThinkingLine())
+		m.thinkingLine = ""
+		m.thinkingTitle = title
+		m.thinkingHeader = false
+	}
+	if m.thinkingTitle == "" {
+		m.thinkingTitle = title
+	}
+	m.thinkingLine += strings.ReplaceAll(delta, "\r", "")
+	for {
+		idx := strings.Index(m.thinkingLine, "\n")
+		if idx < 0 {
+			break
+		}
+		line := strings.TrimSpace(m.thinkingLine[:idx])
+		m.thinkingLine = m.thinkingLine[idx+1:]
+		if line != "" {
+			outputs = append(outputs, m.renderThinkingLine(line))
+		}
+	}
+	for lipgloss.Width(strings.TrimSpace(m.thinkingLine)) >= m.thinkingFlushWidth() {
+		line, rest := splitThinkingLine(m.thinkingLine, m.thinkingFlushWidth())
+		if strings.TrimSpace(line) == "" {
+			break
+		}
+		outputs = append(outputs, m.renderThinkingLine(strings.TrimSpace(line)))
+		m.thinkingLine = rest
+	}
+	if endsThinkingSentence(m.thinkingLine) {
+		outputs = append(outputs, m.flushThinkingLine())
+	}
+	return strings.Join(compactOutputs(outputs...), "\n")
+}
+
+func (m *model) flushThinkingLine() string {
+	line := strings.TrimSpace(m.thinkingLine)
+	m.thinkingLine = ""
+	if line == "" {
+		return ""
+	}
+	return m.renderThinkingLine(line)
+}
+
+func (m *model) renderThinkingLine(line string) string {
+	content := line
+	if !m.thinkingHeader {
+		title := m.thinkingTitle
+		if title == "" {
+			title = "Thinking"
+		}
+		content = sectionStyle.Render(title) + "\n" + line
+		m.thinkingHeader = true
+	}
+	return thinkingEntryStyle.Render(content)
+}
+
+func (m *model) resetThinkingBuffer() {
+	m.thinkingTitle = ""
+	m.thinkingLine = ""
+	m.thinkingHeader = false
+}
+
+func (m model) thinkingFlushWidth() int {
+	width := m.width - 10
+	if width < 40 {
+		return 40
+	}
+	if width > 96 {
+		return 96
+	}
+	return width
+}
+
+func splitThinkingLine(s string, width int) (string, string) {
+	before, under, after := splitAtVisualColumn(s, width)
+	if strings.TrimSpace(before) == "" {
+		return s, ""
+	}
+	return before, under + after
+}
+
+func endsThinkingSentence(s string) bool {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return false
+	}
+	runes := []rune(s)
+	last := runes[len(runes)-1]
+	return strings.ContainsRune("，,；;。.!！？?", last)
+}
+
+func compactOutputs(outputs ...string) []string {
+	compacted := make([]string, 0, len(outputs))
+	for _, output := range outputs {
+		if strings.TrimSpace(output) != "" {
+			compacted = append(compacted, output)
+		}
+	}
+	return compacted
+}
+
+func (m *model) appendStreamDelta(role, prefix, delta string) {
+	if delta == "" {
+		return
+	}
+	if len(m.entries) > 0 {
+		last := &m.entries[len(m.entries)-1]
+		if last.Role == role && strings.HasPrefix(last.Content, prefix) {
+			last.Content += delta
+			return
+		}
+	}
+	m.entries = append(m.entries, entry{Role: role, Content: prefix + delta, Time: time.Now()})
+}
+
+func formatEventContent(ev agent.Event) string {
+	title := strings.TrimSpace(ev.Title)
+	content := strings.TrimSpace(ev.Content)
+	switch ev.Type {
+	case agent.EventThinking:
+		if title == "" {
+			title = "Thinking"
+		}
+		return sectionStyle.Render(title) + "\n" + content
+	case agent.EventToolCall:
+		if title == "" {
+			title = "tool"
+		}
+		return toolCallHeaderStyle.Render("Tool use: "+title) + "\n" + content
+	case agent.EventToolResult:
+		if title == "" {
+			title = "tool"
+		}
+		return toolResultHeaderStyle.Render("Tool result: "+title) + "\n" + content
+	default:
+		if title == "" {
+			return content
+		}
+		return title + "\n" + content
+	}
+}
+
+func (m model) statusBar() string {
+	width := max(40, m.width)
+	ctxUsed := m.estimatedContextTokens()
+	ctxMax := m.startup.MaxContext
+	if ctxMax <= 0 {
+		ctxMax = 128000
+	}
+	modelName := displayModelName(m.startup.Model)
+	left := modeStyle.Render(m.mode)
+	if modelName != "" {
+		left += " " + modelStyle.Render(modelName)
+	}
+	right := m.contextStatus(ctxUsed, ctxMax) + " " + mutedStyle.Render(truncateMiddle(m.startup.CWD, max(18, width/3)))
+	gap := width - lipgloss.Width(left) - lipgloss.Width(right) - 1
+	if gap < 1 {
+		gap = 1
+	}
+	line := left + strings.Repeat(" ", gap) + right
+	return statusStyle.Width(width).Render(line)
+}
+
+func (m model) estimatedContextTokens() int {
+	chars := 0
+	for _, e := range m.entries {
+		chars += len([]rune(e.Role)) + len([]rune(e.Content)) + 8
+	}
+	chars += len([]rune(m.answerDraft))
+	chars += len([]rune(m.input.Value()))
+	// Add a conservative fixed overhead for system prompt, tool definitions,
+	// skill index and runtime context. The exact provider-side count is only
+	// known after a model call, but this keeps the bar directionally useful.
+	return 1200 + chars/3
+}
+
+func (m model) contextStatus(used, window int) string {
+	if used < 0 {
+		used = 0
+	}
+	if used > window {
+		used = window
+	}
+	percent := 0
+	if window > 0 {
+		percent = int(float64(used) / float64(window) * 100)
+	}
+	if percent == 0 && used > 0 {
+		percent = 1
+	}
+	return okStyle.Render("ctx") + " " +
+		progressBar(used, window, 12) + " " +
+		mutedStyle.Render(fmt.Sprintf("%d%% %s/%s", percent, compactTokenCount(used), compactTokenCount(window)))
+}
+
+func displayModelName(model string) string {
+	model = strings.TrimSpace(model)
+	if model == "" {
+		return ""
+	}
+	parts := strings.FieldsFunc(model, func(r rune) bool {
+		return r == '-' || r == '_' || r == '/' || r == ' '
+	})
+	out := make([]string, 0, len(parts))
+	for _, part := range parts {
+		if part == "" {
+			continue
+		}
+		lower := strings.ToLower(part)
+		switch lower {
+		case "deepseek":
+			out = append(out, "DeepSeek")
+		case "glm":
+			out = append(out, "GLM")
+		case "gpt":
+			out = append(out, "GPT")
+		case "v1", "v2", "v3", "v4", "v5":
+			out = append(out, strings.ToUpper(lower))
+		default:
+			out = append(out, titleToken(lower))
+		}
+	}
+	return strings.Join(out, " ")
+}
+
+func titleToken(s string) string {
+	if s == "" {
+		return ""
+	}
+	r := []rune(s)
+	return strings.ToUpper(string(r[:1])) + string(r[1:])
+}
+
+func progressBar(used, window, width int) string {
+	if width <= 0 {
+		return ""
+	}
+	filled := 0
+	if window > 0 {
+		filled = int(float64(used) / float64(window) * float64(width))
+	}
+	if used > 0 && filled == 0 {
+		filled = 1
+	}
+	if filled > width {
+		filled = width
+	}
+	return progressFillStyle.Render(strings.Repeat("█", filled)) +
+		progressEmptyStyle.Render(strings.Repeat(" ", width-filled))
+}
+
+func compactTokenCount(n int) string {
+	if n >= 1000000 {
+		return fmt.Sprintf("%.1fM", float64(n)/1000000)
+	}
+	if n >= 1000 {
+		return fmt.Sprintf("%.1fk", float64(n)/1000)
+	}
+	return fmt.Sprintf("%d", n)
+}
+
+func truncateMiddle(s string, width int) string {
+	if width <= 0 || lipgloss.Width(s) <= width {
+		return s
+	}
+	if width <= 3 {
+		return strings.Repeat(".", width)
+	}
+	r := []rune(s)
+	keep := width - 3
+	left := keep / 2
+	right := keep - left
+	if left+right >= len(r) {
+		return s
+	}
+	return string(r[:left]) + "..." + string(r[len(r)-right:])
+}
+
+func slashHelp() string {
+	return strings.TrimSpace(`
+PaiCLI commands:
+
+- /plan <task>  Run Plan-and-Execute
+- /team <task>  Run Multi-Agent workflow
+- /help         Show this help
+- /exit         Quit
+
+CLI commands outside the TUI:
+
+- paicli doctor
+- paicli index
+- paicli search <query>
+- paicli serve --port 8080
+- paicli wechat status
+`)
+}
+
+const (
+	inputPrompt      = "* "
+	inputPlaceholder = "Type your message or @path/to/file"
+	maxInputRows     = 4
+)
+
+var (
+	logoStyle             = lipgloss.NewStyle().Foreground(lipgloss.Color("42")).Bold(true)
+	titleStyle            = lipgloss.NewStyle().Foreground(lipgloss.Color("15")).Bold(true)
+	sectionStyle          = lipgloss.NewStyle().Foreground(lipgloss.Color("42")).Bold(true)
+	boldStyle             = lipgloss.NewStyle().Bold(true)
+	mutedStyle            = lipgloss.NewStyle().Foreground(lipgloss.Color("245"))
+	panelStyle            = lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(lipgloss.Color("238")).Padding(0, 1)
+	userStyle             = lipgloss.NewStyle().Background(lipgloss.Color("236")).Foreground(lipgloss.Color("252")).Padding(0, 1)
+	assistantStyle        = lipgloss.NewStyle().Foreground(lipgloss.Color("252"))
+	errorStyle            = lipgloss.NewStyle().Foreground(lipgloss.Color("196")).Bold(true)
+	inputFillStyle        = lipgloss.NewStyle().Background(lipgloss.Color("236"))
+	inputPromptStyle      = lipgloss.NewStyle().Background(lipgloss.Color("236")).Foreground(lipgloss.Color("252"))
+	inputTextStyle        = lipgloss.NewStyle().Background(lipgloss.Color("236")).Foreground(lipgloss.Color("252"))
+	inputPlaceholderStyle = lipgloss.NewStyle().
+				Background(lipgloss.Color("236")).
+				Foreground(lipgloss.Color("244"))
+	statusStyle        = lipgloss.NewStyle().BorderTop(true).BorderForeground(lipgloss.Color("238"))
+	modeStyle          = lipgloss.NewStyle().Foreground(lipgloss.Color("196")).Bold(true)
+	modelStyle         = lipgloss.NewStyle().Foreground(lipgloss.Color("245"))
+	okStyle            = lipgloss.NewStyle().Foreground(lipgloss.Color("42")).Bold(true)
+	thinkingStyle      = lipgloss.NewStyle().Foreground(lipgloss.Color("220")).Bold(true)
+	thinkingEntryStyle = lipgloss.NewStyle().
+				Border(lipgloss.NormalBorder(), false, false, false, true).
+				BorderForeground(lipgloss.Color("220")).
+				Foreground(lipgloss.Color("252")).
+				PaddingLeft(1)
+	toolCallEntryStyle = lipgloss.NewStyle().
+				Border(lipgloss.NormalBorder(), false, false, false, true).
+				BorderForeground(lipgloss.Color("39")).
+				Foreground(lipgloss.Color("252")).
+				PaddingLeft(1)
+	toolResultEntryStyle = lipgloss.NewStyle().
+				Border(lipgloss.NormalBorder(), false, false, false, true).
+				BorderForeground(lipgloss.Color("244")).
+				Foreground(lipgloss.Color("245")).
+				PaddingLeft(1)
+	toolCallHeaderStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("39")).Bold(true)
+	toolResultHeaderStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("245")).Bold(true)
+	progressFillStyle     = lipgloss.NewStyle().Foreground(lipgloss.Color("42"))
+	progressEmptyStyle    = lipgloss.NewStyle().Background(lipgloss.Color("236"))
+)
+
+func max(a, b int) int {
+	if a > b {
+		return a
+	}
+	return b
+}

@@ -1,0 +1,306 @@
+package tui
+
+import (
+	"context"
+	"strings"
+	"testing"
+
+	"github.com/charmbracelet/lipgloss"
+	"github.com/charmbracelet/x/ansi"
+
+	"github.com/itwanger/paicli-go/internal/agent"
+)
+
+func TestStripTerminalControlResponses(t *testing.T) {
+	cases := map[string]string{
+		"]11;rgb:0000/0000/0000\\":              "",
+		"\x1b]11;rgb:0000/0000/0000\x1b\\hello": "hello",
+		"normal text":                           "normal text",
+	}
+	for input, want := range cases {
+		if got := stripTerminalControlResponses(input); got != want {
+			t.Fatalf("stripTerminalControlResponses(%q) = %q, want %q", input, got, want)
+		}
+	}
+}
+
+func TestCompactTokenCount(t *testing.T) {
+	cases := map[int]string{
+		999:     "999",
+		1200:    "1.2k",
+		128000:  "128.0k",
+		1200000: "1.2M",
+	}
+	for input, want := range cases {
+		if got := compactTokenCount(input); got != want {
+			t.Fatalf("compactTokenCount(%d) = %q, want %q", input, got, want)
+		}
+	}
+}
+
+func TestContextStatusUsesMillionWindowAndGreyEmptyProgress(t *testing.T) {
+	m := newModel(context.Background(), nil, Startup{Model: "deepseek-v4-pro"})
+	got := m.contextStatus(1200, 1000000)
+	plain := ansi.Strip(got)
+	if !strings.Contains(plain, "1% 1.2k/1.0M") {
+		t.Fatalf("context status should show 1M window, got %q", plain)
+	}
+	if progressEmptyStyle.GetBackground() != lipgloss.Color("236") {
+		t.Fatalf("empty progress area should use grey background")
+	}
+}
+
+func TestTruncateMiddle(t *testing.T) {
+	got := truncateMiddle("/Users/itwanger/Documents/GitHub/paicli-go", 18)
+	if got == "/Users/itwanger/Documents/GitHub/paicli-go" {
+		t.Fatal("expected long path to be truncated")
+	}
+	if len([]rune(got)) > 18 {
+		t.Fatalf("truncated path too long: %q", got)
+	}
+}
+
+func TestInputRows(t *testing.T) {
+	if got := inputRows("", 20); got != 1 {
+		t.Fatalf("empty input rows = %d, want 1", got)
+	}
+	if got := inputRows("short", 20); got != 1 {
+		t.Fatalf("short input rows = %d, want 1", got)
+	}
+	if got := inputRows(strings.Repeat("a", 45), 20); got != 3 {
+		t.Fatalf("wrapped input rows = %d, want 3", got)
+	}
+	if got := inputRows(strings.Repeat("a", 200), 20); got != 4 {
+		t.Fatalf("long input rows = %d, want cap 4", got)
+	}
+}
+
+func TestInputBoxUsesFullWidth(t *testing.T) {
+	m := newModel(context.Background(), nil, Startup{})
+	m.width = 80
+	m.updateInputLayout()
+	got := m.inputBox()
+	if lipglossWidth := printableWidth(got); lipglossWidth != 80 {
+		t.Fatalf("input box width = %d, want 80", lipglossWidth)
+	}
+	if !strings.Contains(got, inputPlaceholder) {
+		t.Fatalf("input box should render placeholder %q, got %q", inputPlaceholder, got)
+	}
+	plain := ansi.Strip(got)
+	lines := strings.Split(plain, "\n")
+	if len(lines) != 1 {
+		t.Fatalf("input box rows = %d, want 1: %q", len(lines), plain)
+	}
+	if !strings.HasPrefix(lines[0], inputPrompt+inputPlaceholder) {
+		t.Fatalf("input should render textarea prompt and placeholder, got %q", lines[0])
+	}
+}
+
+func TestViewKeepsInputInsideTerminalFrame(t *testing.T) {
+	m := newModel(context.Background(), nil, Startup{Model: "deepseek-v4-pro"})
+	m.width = 80
+	m.height = 24
+	m.updateInputLayout()
+	got := m.View()
+	plain := trimLineRight(ansi.Strip(got))
+	if h := lipgloss.Height(got); h != m.height {
+		t.Fatalf("view height = %d, want %d:\n%s", h, m.height, plain)
+	}
+	if !strings.Contains(plain, inputPrompt+inputPlaceholder+"\n") {
+		t.Fatalf("input should stay in the fixed TUI frame, got:\n%s", plain)
+	}
+	for _, want := range []string{"PaiCLI", "DeepSeek V4 Pro", "What's ready", "PaiCLI Go，可以帮你"} {
+		if !strings.Contains(plain, want) {
+			t.Fatalf("view should contain %q, got:\n%s", want, plain)
+		}
+	}
+}
+
+func TestDisplayModelName(t *testing.T) {
+	cases := map[string]string{
+		"deepseek-v4-flash": "DeepSeek V4 Flash",
+		"deepseek-v4-pro":   "DeepSeek V4 Pro",
+		"glm-5.1":           "GLM 5.1",
+	}
+	for input, want := range cases {
+		if got := displayModelName(input); got != want {
+			t.Fatalf("displayModelName(%q) = %q, want %q", input, got, want)
+		}
+	}
+}
+
+func TestFormatEventContent(t *testing.T) {
+	thinking := formatEventContent(agent.Event{
+		Type:    agent.EventThinking,
+		Title:   "Thinking #1",
+		Content: "需要先读取文件。",
+	})
+	if !strings.Contains(thinking, "Thinking #1") || !strings.Contains(thinking, "需要先读取文件。") {
+		t.Fatalf("thinking event not formatted correctly: %q", thinking)
+	}
+
+	toolUse := formatEventContent(agent.Event{
+		Type:    agent.EventToolCall,
+		Title:   "read_file",
+		Content: `{"path":"README.md"}`,
+	})
+	if !strings.Contains(toolUse, "Tool use: read_file") || !strings.Contains(toolUse, "README.md") {
+		t.Fatalf("tool call event not formatted correctly: %q", toolUse)
+	}
+
+	toolResult := formatEventContent(agent.Event{
+		Type:    agent.EventToolResult,
+		Title:   "read_file",
+		Content: "PaiCLI Go",
+	})
+	if !strings.Contains(toolResult, "Tool result: read_file") || !strings.Contains(toolResult, "PaiCLI Go") {
+		t.Fatalf("tool result event not formatted correctly: %q", toolResult)
+	}
+}
+
+func TestTranscriptRendersFullProcessAndAnswer(t *testing.T) {
+	m := newModel(context.Background(), nil, Startup{})
+	m.width = 100
+	m.renderer, _ = newMarkdownRenderer(96)
+	longAnswer := "## 答案\n\n" + strings.Repeat("- 很长的 Markdown 输出\n", 40)
+	m.entries = []entry{
+		{Role: "user", Content: "联网搜一下沉默王二是谁"},
+		{Role: string(agent.EventThinking), Content: formatEventContent(agent.Event{
+			Type:    agent.EventThinking,
+			Title:   "Thinking #1",
+			Content: "需要先联网搜索。",
+		})},
+		{Role: string(agent.EventToolCall), Content: formatEventContent(agent.Event{
+			Type:    agent.EventToolCall,
+			Title:   "web_search",
+			Content: `{"query":"沉默王二是谁"}`,
+		})},
+		{Role: string(agent.EventToolResult), Content: formatEventContent(agent.Event{
+			Type:    agent.EventToolResult,
+			Title:   "web_search",
+			Content: "搜索结果内容。",
+		})},
+		{Role: "assistant", Content: longAnswer},
+	}
+
+	got := m.transcript()
+	plain := ansi.Strip(got)
+	for _, want := range []string{"Thinking #1", "Tool use: web_search", "沉默王二是谁", "Tool result: web_search", "搜索结果内容", "很长的 Markdown 输出"} {
+		if !strings.Contains(plain, want) {
+			t.Fatalf("transcript should render %q, got:\n%s", want, got)
+		}
+	}
+	if strings.Contains(plain, "clipped") || strings.Contains(plain, "truncated") {
+		t.Fatalf("transcript should not clip or truncate content, got:\n%s", got)
+	}
+}
+
+func TestApplyStreamEventMergesDeltas(t *testing.T) {
+	m := newModel(context.Background(), nil, Startup{})
+	m.entries = nil
+	first := m.applyStreamEvent(agent.Event{Type: agent.EventThinkingDelta, Title: "Thinking #1", Content: "用户"})
+	second := m.applyStreamEvent(agent.Event{Type: agent.EventThinkingDelta, Title: "Thinking #1", Content: "打了个"})
+	third := m.applyStreamEvent(agent.Event{Type: agent.EventThinkingDelta, Title: "Thinking #1", Content: "招呼。"})
+	if len(m.entries) != 1 {
+		t.Fatalf("thinking entries = %d, want 1", len(m.entries))
+	}
+	if !strings.Contains(m.entries[0].Content, "用户打了个招呼。") {
+		t.Fatalf("thinking content not merged: %q", m.entries[0].Content)
+	}
+	if first != "" || second != "" {
+		t.Fatalf("small thinking deltas should be buffered, got first=%q second=%q", first, second)
+	}
+	plainThird := ansi.Strip(third)
+	if !strings.Contains(plainThird, "Thinking #1") || !strings.Contains(plainThird, "用户打了个招呼。") {
+		t.Fatalf("thinking stream should flush a complete line, got %q", third)
+	}
+
+	firstAnswer := m.applyStreamEvent(agent.Event{Type: agent.EventAnswerDelta, Content: "你"})
+	secondAnswer := m.applyStreamEvent(agent.Event{Type: agent.EventAnswerDelta, Content: "好"})
+	if len(m.entries) != 1 {
+		t.Fatalf("entries = %d, want 1", len(m.entries))
+	}
+	if m.answerDraft != "你好" {
+		t.Fatalf("answer delta draft = %q, want 你好", m.answerDraft)
+	}
+	if firstAnswer != "" || secondAnswer != "" {
+		t.Fatalf("answer deltas should be collected for final markdown render, got %q %q", firstAnswer, secondAnswer)
+	}
+}
+
+func TestStreamDoneAppendsDraftAsFinalAnswer(t *testing.T) {
+	m := newModel(context.Background(), nil, Startup{})
+	m.entries = []entry{{Role: "user", Content: "你好"}}
+	m.answerDraft = "**你好**"
+
+	updated, _ := m.Update(streamDoneMsg{})
+	got := updated.(model)
+
+	if got.answerDraft != "" {
+		t.Fatalf("answer draft should reset, got %q", got.answerDraft)
+	}
+	if len(got.entries) != 2 {
+		t.Fatalf("entries = %d, want 2", len(got.entries))
+	}
+	if got.entries[1].Role != "assistant" || got.entries[1].Content != "**你好**" {
+		t.Fatalf("final answer entry = %#v", got.entries[1])
+	}
+}
+
+func TestToolEventFlushesPendingThinkingLine(t *testing.T) {
+	m := newModel(context.Background(), nil, Startup{})
+	m.entries = nil
+	if got := m.applyStreamEvent(agent.Event{Type: agent.EventThinkingDelta, Title: "Thinking #1", Content: "先查询工具"}); got != "" {
+		t.Fatalf("partial thinking should stay buffered, got %q", got)
+	}
+	got := ansi.Strip(m.applyStreamEvent(agent.Event{
+		Type:    agent.EventToolCall,
+		Title:   "web_search",
+		Content: `{"query":"test"}`,
+	}))
+	for _, want := range []string{"Thinking #1", "先查询工具", "Tool use: web_search"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("tool event should flush pending thinking and render tool use %q, got:\n%s", want, got)
+		}
+	}
+}
+
+func TestAnswerMsgAppendsEventsBeforeAnswer(t *testing.T) {
+	m := newModel(context.Background(), nil, Startup{})
+	updated, _ := m.Update(answerMsg{
+		Answer: "**done**",
+		Events: []agent.Event{{
+			Type:    agent.EventToolCall,
+			Title:   "read_file",
+			Content: `{"path":"README.md"}`,
+		}},
+	})
+	got := updated.(model)
+	if len(got.entries) != 3 {
+		t.Fatalf("entries = %d, want 3", len(got.entries))
+	}
+	if got.entries[1].Role != string(agent.EventToolCall) {
+		t.Fatalf("event role = %q, want %q", got.entries[1].Role, agent.EventToolCall)
+	}
+	if got.entries[2].Role != "assistant" {
+		t.Fatalf("final answer role = %q, want assistant", got.entries[2].Role)
+	}
+}
+
+func printableWidth(s string) int {
+	width := 0
+	for _, line := range strings.Split(s, "\n") {
+		if w := lipgloss.Width(line); w > width {
+			width = w
+		}
+	}
+	return width
+}
+
+func trimLineRight(s string) string {
+	lines := strings.Split(s, "\n")
+	for i, line := range lines {
+		lines[i] = strings.TrimRight(line, " ")
+	}
+	return strings.Join(lines, "\n")
+}

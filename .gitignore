@@ -1,0 +1,13 @@
+.env
+.env.*
+!.env.example
+
+.paicli/
+
+/paicli
+/paicli-go
+*.test
+*.out
+coverage.txt
+
+.DS_Store
