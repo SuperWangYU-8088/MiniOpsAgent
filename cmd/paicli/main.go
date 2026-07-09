@@ -40,6 +40,7 @@ func rootCommand() *cobra.Command {
 	var once string
 	var plain bool
 	var cwd string
+	var mode string
 
 	cmd := &cobra.Command{
 		Use:   "paicli",
@@ -56,7 +57,7 @@ func rootCommand() *cobra.Command {
 			}
 			defer env.Close()
 			if once != "" {
-				answer, err := env.Agent.Run(cmd.Context(), once)
+				answer, err := runAgentInput(cmd.Context(), env.Agent, mode, once)
 				if err != nil {
 					return err
 				}
@@ -64,7 +65,7 @@ func rootCommand() *cobra.Command {
 				return nil
 			}
 			if plain {
-				return runPlain(cmd.Context(), env)
+				return runPlain(cmd.Context(), env, mode)
 			}
 			return tui.Run(cmd.Context(), env.Agent, tui.Startup{
 				Version:       version.Version,
@@ -82,6 +83,7 @@ func rootCommand() *cobra.Command {
 	cmd.Flags().StringVar(&once, "once", "", "run one prompt and exit")
 	cmd.Flags().BoolVar(&plain, "plain", false, "use plain stdin/stdout REPL")
 	cmd.Flags().StringVar(&cwd, "cwd", "", "workspace directory")
+	cmd.Flags().StringVar(&mode, "mode", "", "run mode for --once or --plain: react, plan, team")
 	cmd.AddCommand(versionCommand(), doctorCommand(), indexCommand(), searchCommand(), graphCommand(),
 		serveCommand(), wechatCommand(), snapshotCommand())
 	return cmd
@@ -144,7 +146,7 @@ func bootstrap(ctx context.Context) (*environment, error) {
 	}, nil
 }
 
-func runPlain(ctx context.Context, env *environment) error {
+func runPlain(ctx context.Context, env *environment, mode string) error {
 	fmt.Printf("PaiCLI Go %s (%s/%s). Type /exit to quit.\n", version.Version, env.Client.Provider(), env.Client.Model())
 	scanner := bufio.NewScanner(os.Stdin)
 	for {
@@ -156,13 +158,20 @@ func runPlain(ctx context.Context, env *environment) error {
 		if strings.TrimSpace(line) == "/exit" {
 			return nil
 		}
-		answer, err := env.Agent.Run(ctx, line)
+		answer, err := runAgentInput(ctx, env.Agent, mode, line)
 		if err != nil {
 			fmt.Println("error:", err)
 			continue
 		}
 		fmt.Println(answer)
 	}
+}
+
+func runAgentInput(ctx context.Context, ag *agent.Agent, mode string, input string) (string, error) {
+	if strings.TrimSpace(mode) != "" {
+		return ag.RunMode(ctx, agent.RunMode(mode), input)
+	}
+	return ag.RunCommand(ctx, input)
 }
 
 func versionCommand() *cobra.Command {

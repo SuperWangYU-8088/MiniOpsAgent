@@ -215,6 +215,31 @@ func TestViewKeepsInputInsideTerminalFrame(t *testing.T) {
 	}
 }
 
+func TestInputCursorPositionPointsToTextarea(t *testing.T) {
+	m := newModel(context.Background(), nil, Startup{Model: "deepseek-v4-pro"})
+	m.width = 80
+	m.height = 24
+	m.input.SetValue("支持Plan-and-Execute吗?")
+	m.updateInputLayout()
+	m.syncTranscriptViewport(true)
+
+	row, col := m.inputCursorPosition()
+	plain := trimLineRight(ansi.Strip(m.View()))
+	lines := strings.Split(plain, "\n")
+	if row < 1 || row > len(lines) {
+		t.Fatalf("cursor row %d outside view height %d:\n%s", row, len(lines), plain)
+	}
+	if !strings.Contains(lines[row-1], inputPrompt+"支持Plan-and-Execute吗?") {
+		t.Fatalf("cursor row should be textarea content row, got row %d %q:\n%s", row, lines[row-1], plain)
+	}
+	if col <= lipgloss.Width(inputPrompt) {
+		t.Fatalf("cursor column should be after input prompt, got %d", col)
+	}
+	if statusRow := strings.TrimSpace(lines[len(lines)-1]); strings.HasPrefix(lines[row-1], statusRow) {
+		t.Fatalf("cursor row should not point to status bar")
+	}
+}
+
 func TestTranscriptViewportScrollsToPreviousOutput(t *testing.T) {
 	m := overflowingTranscriptModel()
 

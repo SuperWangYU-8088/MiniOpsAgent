@@ -8,13 +8,15 @@ This file tracks the Go port against the Java PaiCLI surface in
 - CLI: `paicli`, `doctor`, `index`, `search`, `graph`, `serve`, `wechat`.
 - TUI: full-window Bubble Tea alternate-screen UI, solid `π` logo, transcript,
   textarea input area, mode/status bar.
-- Agent: ReAct loop, tool-call execution, Plan-and-Execute entry, Multi-Agent roles.
+- Agent: ReAct loop, tool-call execution, shared run-mode dispatch for ReAct,
+  Plan-and-Execute and Multi-Agent roles.
 - Tools: file read/write/list/glob, deterministic grep, shell execution, project creation,
   RAG `search_code`, web search, web fetch, memory save, skill load, snapshot restore.
 - Search/RAG: local code index with token scoring and import/function relation extraction.
 - MCP: user/project config loading, stdio/HTTP JSON-RPC, dynamic `mcp__server__tool` registration.
 - Skill: builtin/user/project lookup, frontmatter parser, enabled/disabled state, lazy context buffer.
-- Runtime API: local authenticated threads/turns/events.
+- Runtime API: local authenticated threads/turns/events with `react`, `plan`
+  and `team` turn modes.
 - WeChat: command surface, account store/status, formatter and non-interactive safety policy.
 - Safety: workspace PathGuard, command blacklist, dangerous operation audit log.
 

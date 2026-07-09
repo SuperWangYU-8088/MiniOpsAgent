@@ -101,15 +101,28 @@ func (s *Server) turnHandler(w http.ResponseWriter, r *http.Request, thread *Thr
 	}
 	var req struct {
 		Input string `json:"input"`
+		Mode  string `json:"mode"`
 	}
 	if json.NewDecoder(r.Body).Decode(&req) != nil || strings.TrimSpace(req.Input) == "" {
 		http.Error(w, "input is required", http.StatusBadRequest)
 		return
 	}
+	if strings.TrimSpace(req.Mode) != "" && !agent.IsRunMode(agent.RunMode(req.Mode)) {
+		http.Error(w, "mode must be one of: react, plan, team", http.StatusBadRequest)
+		return
+	}
 	turnID := "turn-" + time.Now().Format("20060102150405.000000000")
 	s.appendEvent(thread, "turn.started", map[string]string{"id": turnID})
 	go func() {
-		answer, err := s.agentFactory().Run(context.Background(), req.Input)
+		var (
+			answer string
+			err    error
+		)
+		if strings.TrimSpace(req.Mode) != "" {
+			answer, err = s.agentFactory().RunMode(context.Background(), agent.RunMode(req.Mode), req.Input)
+		} else {
+			answer, err = s.agentFactory().RunCommand(context.Background(), req.Input)
+		}
 		if err != nil {
 			s.appendEvent(thread, "turn.failed", map[string]any{"id": turnID, "error": err.Error()})
 			return

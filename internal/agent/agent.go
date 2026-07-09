@@ -40,6 +40,14 @@ type Event struct {
 
 type Observer func(Event)
 
+type RunMode string
+
+const (
+	RunModeReact RunMode = "react"
+	RunModePlan  RunMode = "plan"
+	RunModeTeam  RunMode = "team"
+)
+
 func New(client llm.Client, registry *tools.Registry, memory *MemoryStore, skills *skill.Registry) *Agent {
 	a := &Agent{
 		client:  client,
@@ -64,6 +72,70 @@ func (a *Agent) SetSnapshotService(s *snapshot.Service) {
 
 func (a *Agent) Run(ctx context.Context, input string) (string, error) {
 	return a.RunWithObserver(ctx, input, nil)
+}
+
+func (a *Agent) RunCommand(ctx context.Context, input string) (string, error) {
+	return a.RunCommandWithObserver(ctx, input, nil)
+}
+
+func (a *Agent) RunCommandWithObserver(ctx context.Context, input string, observe Observer) (string, error) {
+	mode, prompt := ParseRunCommand(input)
+	return a.RunModeWithObserver(ctx, mode, prompt, observe)
+}
+
+func (a *Agent) RunMode(ctx context.Context, mode RunMode, input string) (string, error) {
+	return a.RunModeWithObserver(ctx, mode, input, nil)
+}
+
+func (a *Agent) RunModeWithObserver(ctx context.Context, mode RunMode, input string, observe Observer) (string, error) {
+	switch NormalizeRunMode(mode) {
+	case "", RunModeReact:
+		return a.RunWithObserver(ctx, input, observe)
+	case RunModePlan:
+		return a.PlanAndExecuteWithObserver(ctx, input, observe)
+	case RunModeTeam:
+		return a.Team(ctx, input)
+	default:
+		return "", fmt.Errorf("unknown run mode %q", mode)
+	}
+}
+
+func ParseRunCommand(input string) (RunMode, string) {
+	text := strings.TrimSpace(input)
+	switch {
+	case strings.HasPrefix(text, "/plan "):
+		return RunModePlan, strings.TrimSpace(strings.TrimPrefix(text, "/plan "))
+	case strings.EqualFold(text, "/plan"):
+		return RunModePlan, ""
+	case strings.HasPrefix(text, "/team "):
+		return RunModeTeam, strings.TrimSpace(strings.TrimPrefix(text, "/team "))
+	case strings.EqualFold(text, "/team"):
+		return RunModeTeam, ""
+	default:
+		return RunModeReact, input
+	}
+}
+
+func NormalizeRunMode(mode RunMode) RunMode {
+	switch strings.ToLower(strings.TrimSpace(string(mode))) {
+	case "", string(RunModeReact):
+		return RunModeReact
+	case string(RunModePlan), "plan-and-execute", "plan_and_execute":
+		return RunModePlan
+	case string(RunModeTeam), "multi-agent", "multi_agent":
+		return RunModeTeam
+	default:
+		return mode
+	}
+}
+
+func IsRunMode(mode RunMode) bool {
+	switch NormalizeRunMode(mode) {
+	case RunModeReact, RunModePlan, RunModeTeam:
+		return true
+	default:
+		return false
+	}
 }
 
 func (a *Agent) RunWithObserver(ctx context.Context, input string, observe Observer) (string, error) {

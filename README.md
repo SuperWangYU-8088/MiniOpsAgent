@@ -32,6 +32,7 @@ git clone https://github.com/itwanger/paicli-go.git
 cd paicli-go
 go run ./cmd/paicli doctor
 go run ./cmd/paicli --once "你好，介绍一下当前项目"
+go run ./cmd/paicli --mode plan --once "分析这个需求并实现"
 go run ./cmd/paicli
 ```
 
@@ -71,6 +72,8 @@ export SEARXNG_BASE_URL=http://localhost:8080
 /team <task>
 ```
 
+`--once` 和 `--plain` 也支持 `/plan <task>`、`/team <task>` 前缀；脚本化调用时也可以通过 `--mode plan` 或 `--mode team` 显式选择执行模式。
+
 更多命令会随着 Java/Python 版本能力对齐逐步补齐。
 
 ## 内置工具
@@ -108,5 +111,6 @@ go run ./cmd/paicli serve --port 8080
 ```
 
 它提供线程、turn 和事件能力，便于把 PaiCLI Go 接入外部编排系统或后台任务。
+创建 turn 时可以传入 `mode` 字段选择 `react`、`plan` 或 `team`，不传则会按输入前缀自动识别 `/plan` 和 `/team`。
 
 更多 Java parity 记录见 [docs/parity.md](docs/parity.md)。

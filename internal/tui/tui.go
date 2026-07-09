@@ -37,6 +37,7 @@ type model struct {
 	input          textarea.Model
 	transcriptView viewport.Model
 	lastMouseEvent time.Time
+	cursorStop     <-chan struct{}
 	width          int
 	height         int
 	entries        []entry
@@ -77,9 +78,12 @@ type streamDoneMsg struct {
 type streamClosedMsg struct{}
 
 func Run(ctx context.Context, ag *agent.Agent, startup Startup) error {
+	cursorStop := make(chan struct{})
 	m := newModel(ctx, ag, startup)
+	m.cursorStop = cursorStop
 	p := tea.NewProgram(m, tea.WithAltScreen(), tea.WithMouseCellMotion(), tea.WithOutput(os.Stdout))
 	_, err := p.Run()
+	close(cursorStop)
 	return err
 }
 
@@ -150,7 +154,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		if handled := m.handleTranscriptScrollKey(msg); handled {
-			return m, nil
+			return m, m.placeTerminalCursor()
 		}
 		switch msg.String() {
 		case "ctrl+c", "esc":
@@ -182,12 +186,12 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.syncTranscriptViewport(true)
 			stream := make(chan tea.Msg, 256)
 			m.stream = stream
-			return m, tea.Batch(m.runPrompt(text, stream), waitForStream(stream))
+			return m, tea.Batch(m.runPrompt(text, stream), waitForStream(stream), m.placeTerminalCursor())
 		}
 	case tea.MouseMsg:
 		m.lastMouseEvent = time.Now()
 		m.transcriptView, cmd = m.transcriptView.Update(msg)
-		return m, cmd
+		return m, tea.Batch(cmd, m.placeTerminalCursor())
 	case streamEventMsg:
 		wasAtBottom := m.transcriptView.AtBottom()
 		m.applyStreamEvent(msg.Event)
@@ -211,7 +215,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.answerDraft = ""
 		m.syncTranscriptViewport(wasAtBottom)
-		return m, nil
+		return m, m.placeTerminalCursor()
 	case streamClosedMsg:
 		m.stream = nil
 		return m, nil
@@ -244,7 +248,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	m.sanitizeInput()
 	m.updateInputLayout()
 	m.syncTranscriptViewport(m.transcriptView.AtBottom())
-	return m, cmd
+	return m, tea.Batch(cmd, m.placeTerminalCursor())
 }
 
 func (m model) runPrompt(text string, stream chan<- tea.Msg) tea.Cmd {
@@ -264,10 +268,9 @@ func (m model) runPrompt(text string, stream chan<- tea.Msg) tea.Cmd {
 			send(streamEventMsg{Event: event})
 		}
 		switch {
-		case strings.HasPrefix(text, "/plan "):
-			answer, err = m.agent.PlanAndExecuteWithObserver(m.ctx, strings.TrimSpace(strings.TrimPrefix(text, "/plan ")), observe)
-		case strings.HasPrefix(text, "/team "):
-			answer, err = m.agent.Team(m.ctx, strings.TrimSpace(strings.TrimPrefix(text, "/team ")))
+		case strings.HasPrefix(text, "/plan "), strings.EqualFold(text, "/plan"),
+			strings.HasPrefix(text, "/team "), strings.EqualFold(text, "/team"):
+			answer, err = m.agent.RunCommandWithObserver(m.ctx, text, observe)
 		case text == "/help" || text == "/":
 			answer = slashHelp()
 		default:
@@ -297,14 +300,9 @@ func (m model) View() string {
 	status := m.statusBar()
 	banner := m.banner()
 	height := max(8, m.height)
-	transcriptHeight := m.transcriptHeight(banner, input, gap, status, height)
+	transcriptHeight := m.resolvedTranscriptHeight(banner, input, gap, status, height)
 	transcript := m.renderTranscriptViewport(transcriptHeight)
 	view := renderFrame(banner, transcript, input, gap, status)
-	if delta := height - lipgloss.Height(view); delta != 0 {
-		transcriptHeight = max(1, transcriptHeight+delta)
-		transcript = m.renderTranscriptViewport(transcriptHeight)
-		view = renderFrame(banner, transcript, input, gap, status)
-	}
 	return view
 }
 
@@ -317,12 +315,22 @@ func (m model) transcriptHeight(banner, input, gap, status string, terminalHeigh
 	return max(1, terminalHeight-fixedHeight)
 }
 
+func (m model) resolvedTranscriptHeight(banner, input, gap, status string, terminalHeight int) int {
+	height := m.transcriptHeight(banner, input, gap, status, terminalHeight)
+	transcript := m.renderTranscriptViewport(height)
+	view := renderFrame(banner, transcript, input, gap, status)
+	if delta := terminalHeight - lipgloss.Height(view); delta != 0 {
+		height = max(1, height+delta)
+	}
+	return height
+}
+
 func (m *model) syncTranscriptViewport(stickToBottom bool) {
 	banner := m.banner()
 	input := m.inputBox()
 	gap := m.inputStatusGap()
 	status := m.statusBar()
-	height := m.transcriptHeight(banner, input, gap, status, max(8, m.height))
+	height := m.resolvedTranscriptHeight(banner, input, gap, status, max(8, m.height))
 	width := max(1, max(40, m.width)-scrollbarWidth)
 	m.transcriptView.Width = width
 	m.transcriptView.Height = height
@@ -467,6 +475,49 @@ func (m model) inputStatusGap() string {
 	return strings.Repeat(" ", max(40, m.width))
 }
 
+func (m model) placeTerminalCursor() tea.Cmd {
+	row, col := m.inputCursorPosition()
+	stop := m.cursorStop
+	return func() tea.Msg {
+		if stop != nil {
+			select {
+			case <-time.After(terminalCursorPlacementDelay):
+			case <-stop:
+				return nil
+			}
+		} else {
+			time.Sleep(terminalCursorPlacementDelay)
+		}
+		_, _ = fmt.Fprintf(os.Stdout, "\x1b[%d;%dH", row, col)
+		return nil
+	}
+}
+
+func (m model) inputCursorPosition() (int, int) {
+	row := m.renderedInputContentRow()
+	col := lipgloss.Width(inputPrompt) + 1
+	if m.input.Value() != "" {
+		info := m.input.LineInfo()
+		col += info.CharOffset
+	}
+
+	return clamp(row, 1, max(1, m.height)), clamp(col, 1, max(1, m.width))
+}
+
+func (m model) renderedInputContentRow() int {
+	lines := strings.Split(xansi.Strip(m.View()), "\n")
+	for i := len(lines) - 1; i >= 0; i-- {
+		if strings.HasPrefix(lines[i], inputPrompt) {
+			row := i + 1
+			if m.input.Value() != "" {
+				row += m.input.LineInfo().RowOffset
+			}
+			return clamp(row, 1, max(1, len(lines)))
+		}
+	}
+	return max(1, m.height)
+}
+
 func (m model) emptyInputLine(width int) string {
 	prompt := inputPromptStyle.Render(inputPrompt)
 	cursor, rest := splitFirstRune(inputPlaceholder)
@@ -579,6 +630,7 @@ var (
 )
 
 const terminalControlFragmentWindow = 300 * time.Millisecond
+const terminalCursorPlacementDelay = 20 * time.Millisecond
 
 func stripTerminalControlResponses(s string) string {
 	s = terminalControlResponseRE.ReplaceAllString(s, "")
@@ -1038,4 +1090,14 @@ func max(a, b int) int {
 		return a
 	}
 	return b
+}
+
+func clamp(v, lo, hi int) int {
+	if v < lo {
+		return lo
+	}
+	if v > hi {
+		return hi
+	}
+	return v
 }
