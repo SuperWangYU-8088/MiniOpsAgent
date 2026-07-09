@@ -36,6 +36,7 @@ type model struct {
 	startup        Startup
 	input          textarea.Model
 	transcriptView viewport.Model
+	lastMouseEvent time.Time
 	width          int
 	height         int
 	entries        []entry
@@ -141,6 +142,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.syncTranscriptViewport(m.transcriptView.AtBottom())
 	case tea.KeyMsg:
+		if m.isRecentMouseControlFragment(msg) {
+			m.lastMouseEvent = time.Now()
+			return m, nil
+		}
 		if isTerminalControlResponse(msg) {
 			return m, nil
 		}
@@ -180,6 +185,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, tea.Batch(m.runPrompt(text, stream), waitForStream(stream))
 		}
 	case tea.MouseMsg:
+		m.lastMouseEvent = time.Now()
 		m.transcriptView, cmd = m.transcriptView.Update(msg)
 		return m, cmd
 	case streamEventMsg:
@@ -287,34 +293,36 @@ func waitForStream(stream <-chan tea.Msg) tea.Cmd {
 
 func (m model) View() string {
 	input := m.inputBox()
+	gap := m.inputStatusGap()
 	status := m.statusBar()
 	banner := m.banner()
 	height := max(8, m.height)
-	transcriptHeight := m.transcriptHeight(banner, input, status, height)
+	transcriptHeight := m.transcriptHeight(banner, input, gap, status, height)
 	transcript := m.renderTranscriptViewport(transcriptHeight)
-	view := renderFrame(banner, transcript, input, status)
+	view := renderFrame(banner, transcript, input, gap, status)
 	if delta := height - lipgloss.Height(view); delta != 0 {
 		transcriptHeight = max(1, transcriptHeight+delta)
 		transcript = m.renderTranscriptViewport(transcriptHeight)
-		view = renderFrame(banner, transcript, input, status)
+		view = renderFrame(banner, transcript, input, gap, status)
 	}
 	return view
 }
 
-func renderFrame(banner, transcript, input, status string) string {
-	return strings.Join([]string{banner, transcript, input, status}, "\n")
+func renderFrame(banner, transcript, input, gap, status string) string {
+	return strings.Join([]string{banner, transcript, input, gap, status}, "\n")
 }
 
-func (m model) transcriptHeight(banner, input, status string, terminalHeight int) int {
-	fixedHeight := lipgloss.Height(banner) + lipgloss.Height(input) + lipgloss.Height(status) + 3
+func (m model) transcriptHeight(banner, input, gap, status string, terminalHeight int) int {
+	fixedHeight := lipgloss.Height(banner) + lipgloss.Height(input) + lipgloss.Height(gap) + lipgloss.Height(status) + 4
 	return max(1, terminalHeight-fixedHeight)
 }
 
 func (m *model) syncTranscriptViewport(stickToBottom bool) {
 	banner := m.banner()
 	input := m.inputBox()
+	gap := m.inputStatusGap()
 	status := m.statusBar()
-	height := m.transcriptHeight(banner, input, status, max(8, m.height))
+	height := m.transcriptHeight(banner, input, gap, status, max(8, m.height))
 	width := max(1, max(40, m.width)-scrollbarWidth)
 	m.transcriptView.Width = width
 	m.transcriptView.Height = height
@@ -330,7 +338,6 @@ func (m model) renderTranscriptViewport(height int) string {
 	view := m.transcriptView
 	view.Width = max(1, max(40, m.width)-scrollbarWidth)
 	view.Height = max(1, height)
-	view.SetContent(m.transcript())
 	return appendScrollbar(view.View(), m.scrollbar(view))
 }
 
@@ -456,6 +463,10 @@ func inputPaddingLine(width int) string {
 	return inputFillStyle.Render(strings.Repeat(" ", width))
 }
 
+func (m model) inputStatusGap() string {
+	return strings.Repeat(" ", max(40, m.width))
+}
+
 func (m model) emptyInputLine(width int) string {
 	prompt := inputPromptStyle.Render(inputPrompt)
 	cursor, rest := splitFirstRune(inputPlaceholder)
@@ -543,6 +554,17 @@ func isTerminalControlResponse(msg tea.KeyMsg) bool {
 		strings.Contains(s, "\x9d")
 }
 
+func (m model) isRecentMouseControlFragment(msg tea.KeyMsg) bool {
+	if m.lastMouseEvent.IsZero() || time.Since(m.lastMouseEvent) > terminalControlFragmentWindow {
+		return false
+	}
+	s := msg.String()
+	if len(msg.Runes) > 0 {
+		s = string(msg.Runes)
+	}
+	return s != "" && strings.Trim(s, "[") == ""
+}
+
 func (m *model) sanitizeInput() {
 	value := m.input.Value()
 	clean := stripTerminalControlResponses(value)
@@ -555,6 +577,8 @@ var (
 	terminalControlResponseRE = regexp.MustCompile(`(?s)(?:\x1b\]|\])?(?:10|11|12);rgb:[0-9a-fA-F]{1,4}/[0-9a-fA-F]{1,4}/[0-9a-fA-F]{1,4}(?:\x1b\\|\\)?`)
 	terminalMouseResponseRE   = regexp.MustCompile(`(?:\x1b\[|\x9b|\[)?<\d{1,3};\d{1,4};\d{1,4}[mM]`)
 )
+
+const terminalControlFragmentWindow = 300 * time.Millisecond
 
 func stripTerminalControlResponses(s string) string {
 	s = terminalControlResponseRE.ReplaceAllString(s, "")

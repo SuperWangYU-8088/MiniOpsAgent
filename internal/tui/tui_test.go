@@ -54,6 +54,21 @@ func TestMouseWheelScrollsTranscriptAndDoesNotEnterInput(t *testing.T) {
 	if got.input.Value() != "" {
 		t.Fatalf("mouse wheel should not enter input, got %q", got.input.Value())
 	}
+
+	updated, _ = got.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("[[[")})
+	got = updated.(model)
+	if got.input.Value() != "" {
+		t.Fatalf("mouse control fragment should not enter input, got %q", got.input.Value())
+	}
+}
+
+func TestBracketInputStillWorksWithoutRecentMouseEvent(t *testing.T) {
+	m := newModel(context.Background(), nil, Startup{})
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("[")})
+	got := updated.(model)
+	if got.input.Value() != "[" {
+		t.Fatalf("normal bracket input should be preserved, got %q", got.input.Value())
+	}
 }
 
 func TestCompactTokenCount(t *testing.T) {
@@ -187,6 +202,9 @@ func TestViewKeepsInputInsideTerminalFrame(t *testing.T) {
 	if last := strings.TrimSpace(lines[len(lines)-1]); !strings.HasPrefix(last, "YOLO DeepSeek V4 Pro") {
 		t.Fatalf("status bar should be pinned to the last terminal row, got last line %q:\n%s", last, plain)
 	}
+	if gap := strings.TrimSpace(lines[len(lines)-2]); gap != "" {
+		t.Fatalf("input and status bar should be separated by a blank row, got %q:\n%s", gap, plain)
+	}
 	if count := strings.Count(plain, "YOLO DeepSeek V4 Pro"); count != 1 {
 		t.Fatalf("status bar should render once, got %d occurrences:\n%s", count, plain)
 	}
@@ -238,10 +256,10 @@ func TestTranscriptScrollbarAppearsWhenContentOverflows(t *testing.T) {
 func overflowingTranscriptModel() model {
 	m := newModel(context.Background(), nil, Startup{Model: "deepseek-v4-pro"})
 	m.width = 80
-	m.height = 15
+	m.height = 20
 	m.renderer = nil
 	m.entries = nil
-	for i := 1; i <= 6; i++ {
+	for i := 1; i <= 10; i++ {
 		m.entries = append(m.entries, entry{Role: "assistant", Content: fmt.Sprintf("line %02d", i)})
 	}
 	m.syncTranscriptViewport(true)
