@@ -12,7 +12,7 @@ func TestIndexBuildAndSearchGoFunction(t *testing.T) {
 
 import "fmt"
 
-func HelloPaiCLI() {
+func HelloMiniOpsAgent() {
 	fmt.Println("hello")
 }
 `
@@ -23,11 +23,11 @@ func HelloPaiCLI() {
 	if err := idx.Build(root); err != nil {
 		t.Fatal(err)
 	}
-	results := idx.Search("HelloPaiCLI", 3)
+	results := idx.Search("HelloMiniOpsAgent", 3)
 	if len(results) == 0 {
 		t.Fatal("expected search results")
 	}
-	if results[0].Chunk.Symbol != "HelloPaiCLI" {
+	if results[0].Chunk.Symbol != "HelloMiniOpsAgent" {
 		t.Fatalf("expected function chunk first, got %#v", results[0].Chunk)
 	}
 	if len(idx.Relations) == 0 {

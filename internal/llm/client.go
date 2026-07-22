@@ -12,7 +12,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/itwanger/paicli-go/internal/config"
+	"github.com/SuperWangYU-8088/MiniOpsAgent/internal/config"
 )
 
 type OpenAICompatibleClient struct {
@@ -25,7 +25,7 @@ func NewClient(cfg config.Config) (Client, error) {
 	provider := strings.ToLower(cfg.DefaultProvider)
 	p := cfg.Provider(provider)
 	if p.APIKey == "" && provider != "freellmapi" {
-		return nil, fmt.Errorf("missing API key for provider %s; run `paicli doctor` for configuration details", provider)
+		return nil, fmt.Errorf("missing API key for provider %s; run `miniopsagent doctor` for configuration details", provider)
 	}
 	if p.BaseURL == "" || p.Model == "" {
 		return nil, fmt.Errorf("provider %s is missing base_url or model", provider)

@@ -29,7 +29,7 @@ func TestFillProviderDefaultsPreservesUserModelAndFillsBaseURL(t *testing.T) {
 	}
 }
 
-func TestFillProviderDefaultsAfterJavaStyleConfigUnmarshal(t *testing.T) {
+func TestFillProviderDefaultsAfterCamelCaseConfigUnmarshal(t *testing.T) {
 	base := defaults()
 	cfg := defaults()
 	raw := []byte(`{
@@ -70,5 +70,27 @@ func TestApplyEnvDeepSeekV4UsesMillionContext(t *testing.T) {
 	}
 	if got.MaxContext != 1000000 {
 		t.Fatalf("max context = %d, want 1000000", got.MaxContext)
+	}
+}
+
+func TestMiniOpsEnvOverridesSelectedProvider(t *testing.T) {
+	t.Setenv("MINIOPS_PROVIDER", "openai")
+	t.Setenv("MINIOPS_API_KEY", "miniops-key")
+	t.Setenv("MINIOPS_MODEL", "gpt-test")
+	base := defaults()
+	cfg := defaults()
+
+	applyEnv(&cfg)
+	applyModelDefaults(&cfg, base)
+
+	if cfg.DefaultProvider != "openai" {
+		t.Fatalf("default provider = %q, want openai", cfg.DefaultProvider)
+	}
+	got := cfg.Provider("openai")
+	if got.APIKey != "miniops-key" {
+		t.Fatalf("api key = %q, want miniops-key", got.APIKey)
+	}
+	if got.Model != "gpt-test" {
+		t.Fatalf("model = %q, want gpt-test", got.Model)
 	}
 }

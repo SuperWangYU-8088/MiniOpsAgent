@@ -41,7 +41,7 @@ func NewRegistry(projectRoot string) *Registry {
 	home, _ := os.UserHomeDir()
 	return &Registry{
 		projectRoot: projectRoot,
-		statePath:   filepath.Join(home, ".paicli", "skills.json"),
+		statePath:   filepath.Join(home, ".miniopsagent", "skills.json"),
 		skills:      map[string]Skill{},
 		disabled:    map[string]bool{},
 	}
@@ -61,8 +61,8 @@ func (r *Registry) Reload() error {
 		path   string
 		source string
 	}{
-		{filepath.Join(homeDir(), ".paicli", "skills"), "user"},
-		{filepath.Join(r.projectRoot, ".paicli", "skills"), "project"},
+		{filepath.Join(homeDir(), ".miniopsagent", "skills"), "user"},
+		{filepath.Join(r.projectRoot, ".miniopsagent", "skills"), "project"},
 	} {
 		found, err := scanSkills(root.path, root.source)
 		if err != nil {

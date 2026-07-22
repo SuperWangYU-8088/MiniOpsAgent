@@ -7,10 +7,10 @@ import (
 	"strings"
 	"time"
 
-	"github.com/itwanger/paicli-go/internal/llm"
-	"github.com/itwanger/paicli-go/internal/skill"
-	"github.com/itwanger/paicli-go/internal/snapshot"
-	"github.com/itwanger/paicli-go/internal/tools"
+	"github.com/SuperWangYU-8088/MiniOpsAgent/internal/llm"
+	"github.com/SuperWangYU-8088/MiniOpsAgent/internal/skill"
+	"github.com/SuperWangYU-8088/MiniOpsAgent/internal/snapshot"
+	"github.com/SuperWangYU-8088/MiniOpsAgent/internal/tools"
 )
 
 type Agent struct {
@@ -152,6 +152,9 @@ func (a *Agent) RunWithObserver(ctx context.Context, input string, observe Obser
 
 	var final string
 	seenToolCalls := map[string]int{}
+	// Keep the loop bounded. Tool-capable models can get stuck repeating the
+	// same action, so repeated calls and hard iteration limits both end in a
+	// no-tool finalization request.
 	for iter := 0; iter < 10; iter++ {
 		resp, err := a.streamChat(ctx, a.history, a.tools.Definitions(), observe, fmt.Sprintf("Thinking #%d", iter+1), true)
 		if err != nil {
@@ -223,7 +226,7 @@ func (a *Agent) Team(ctx context.Context, input string) (string, error) {
 	contextText := input
 	for _, role := range roles {
 		resp, err := a.client.Chat(ctx, []llm.Message{
-			llm.System(a.systemPrompt("") + "\n\nYou are the " + role + " in a PaiCLI multi-agent workflow."),
+			llm.System(a.systemPrompt("") + "\n\nYou are the " + role + " in a MiniOpsAgent multi-agent workflow."),
 			llm.User(contextText),
 		}, a.tools.Definitions())
 		if err != nil {
@@ -244,7 +247,7 @@ func (a *Agent) refreshSystemPrompt(query string) {
 
 func (a *Agent) systemPrompt(query string) string {
 	var b strings.Builder
-	b.WriteString("You are PaiCLI Go, a terminal-first coding agent. Work with the real local workspace. ")
+	b.WriteString("You are MiniOpsAgent, a terminal-first operations assistant. Work with the real local workspace. ")
 	b.WriteString("Prefer deterministic tools for repository facts, use grep/read before broad semantic search, and never invent tool results.\n\n")
 	b.WriteString("## Current Runtime\n")
 	b.WriteString("Date: " + time.Now().Format("2006-01-02") + "\n")

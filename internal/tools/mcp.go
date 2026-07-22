@@ -56,8 +56,8 @@ func (r *Registry) LoadMCP(ctx context.Context) (ready int, toolCount int) {
 func (r *Registry) loadMCPConfig() map[string]mcpServerConfig {
 	merged := map[string]mcpServerConfig{}
 	paths := []string{
-		filepath.Join(configHome(), ".paicli", "mcp.json"),
-		filepath.Join(r.root, ".paicli", "mcp.json"),
+		filepath.Join(configHome(), ".miniopsagent", "mcp.json"),
+		filepath.Join(r.root, ".miniopsagent", "mcp.json"),
 	}
 	for _, path := range paths {
 		b, err := os.ReadFile(path)
@@ -103,7 +103,7 @@ func (r *Registry) initializeMCP(ctx context.Context, client mcpClient) error {
 	_, err := client.Call(ctx, "initialize", map[string]any{
 		"protocolVersion": "2025-03-26",
 		"capabilities":    map[string]any{},
-		"clientInfo":      map[string]any{"name": "paicli-go", "version": "0.1.0"},
+		"clientInfo":      map[string]any{"name": "miniopsagent", "version": "0.1.0"},
 	})
 	return err
 }

@@ -7,8 +7,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/itwanger/paicli-go/internal/llm"
-	"github.com/itwanger/paicli-go/internal/tools"
+	"github.com/SuperWangYU-8088/MiniOpsAgent/internal/llm"
+	"github.com/SuperWangYU-8088/MiniOpsAgent/internal/tools"
 )
 
 func TestFormatToolCallPrettyJSON(t *testing.T) {

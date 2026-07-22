@@ -8,7 +8,7 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	"github.com/itwanger/paicli-go/internal/config"
+	"github.com/SuperWangYU-8088/MiniOpsAgent/internal/config"
 )
 
 func TestNormalizeFunctionArgumentsFromJSONString(t *testing.T) {

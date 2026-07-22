@@ -28,13 +28,21 @@ type WebConfig struct {
 	SearxngURL string `json:"searxng_url"`
 }
 
+const (
+	AppName      = "MiniOpsAgent"
+	StateDirName = ".miniopsagent"
+)
+
+// Load merges config in the same order an operator normally expects:
+// built-in provider defaults, optional config file, then environment variables.
+// Environment variables always win so deployment scripts can override local files.
 func Load() Config {
 	loadDotEnv(".env")
 	loadDotEnv(filepath.Join(HomeDir(), ".env"))
 
 	base := defaults()
 	cfg := defaults()
-	path := filepath.Join(HomeDir(), ".paicli", "config.json")
+	path := filepath.Join(StateDir(), "config.json")
 	if b, err := os.ReadFile(path); err == nil {
 		_ = json.Unmarshal(b, &cfg)
 	}
@@ -155,7 +163,7 @@ func (c Config) Provider(name string) ProviderConfig {
 }
 
 func (c Config) Save() error {
-	dir := filepath.Join(HomeDir(), ".paicli")
+	dir := StateDir()
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return err
 	}
@@ -164,6 +172,10 @@ func (c Config) Save() error {
 		return err
 	}
 	return os.WriteFile(filepath.Join(dir, "config.json"), b, 0o600)
+}
+
+func StateDir() string {
+	return filepath.Join(HomeDir(), StateDirName)
 }
 
 func HomeDir() string {
@@ -175,6 +187,9 @@ func HomeDir() string {
 }
 
 func applyEnv(cfg *Config) {
+	if v := os.Getenv("MINIOPS_PROVIDER"); v != "" {
+		cfg.DefaultProvider = strings.ToLower(v)
+	}
 	envs := map[string]string{
 		"deepseek":   "DEEPSEEK_API_KEY",
 		"glm":        "GLM_API_KEY",
@@ -198,8 +213,18 @@ func applyEnv(cfg *Config) {
 		}
 		cfg.Providers[name] = p
 	}
-	if v := os.Getenv("PAICLI_PROVIDER"); v != "" {
-		cfg.DefaultProvider = strings.ToLower(v)
+	if provider := strings.ToLower(cfg.DefaultProvider); provider != "" {
+		p := cfg.Provider(provider)
+		if v := os.Getenv("MINIOPS_API_KEY"); v != "" {
+			p.APIKey = v
+		}
+		if v := os.Getenv("MINIOPS_BASE_URL"); v != "" {
+			p.BaseURL = strings.TrimRight(v, "/")
+		}
+		if v := os.Getenv("MINIOPS_MODEL"); v != "" {
+			p.Model = v
+		}
+		cfg.Providers[provider] = p
 	}
 	if v := os.Getenv("SERPAPI_API_KEY"); v != "" {
 		cfg.Web.SerpAPIKey = v

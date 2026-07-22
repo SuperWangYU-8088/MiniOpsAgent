@@ -33,6 +33,12 @@ func (g PathGuard) Resolve(path string) (string, error) {
 	if err != nil {
 		rootReal = g.Root
 	}
+	if targetReal, err := filepath.EvalSymlinks(clean); err == nil {
+		if !within(rootReal, targetReal) {
+			return "", fmt.Errorf("path %q escapes workspace %s", path, g.Root)
+		}
+		return targetReal, nil
+	}
 	parent := clean
 	if _, err := os.Stat(clean); err != nil {
 		parent = filepath.Dir(clean)

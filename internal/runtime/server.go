@@ -9,7 +9,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/itwanger/paicli-go/internal/agent"
+	"github.com/SuperWangYU-8088/MiniOpsAgent/internal/agent"
 )
 
 type Server struct {
@@ -113,6 +113,9 @@ func (s *Server) turnHandler(w http.ResponseWriter, r *http.Request, thread *Thr
 	}
 	turnID := "turn-" + time.Now().Format("20060102150405.000000000")
 	s.appendEvent(thread, "turn.started", map[string]string{"id": turnID})
+	// Turns run asynchronously so API clients can create a turn and then poll
+	// the event stream. This runtime is intentionally in-memory and local-first;
+	// docs describe how to evolve it into a persistent service.
 	go func() {
 		var (
 			answer string
@@ -155,7 +158,7 @@ func (s *Server) auth(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		auth := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
 		if auth == "" {
-			auth = r.Header.Get("X-PaiCLI-API-Key")
+			auth = r.Header.Get("X-MiniOpsAgent-API-Key")
 		}
 		if auth != s.apiKey {
 			http.Error(w, "unauthorized", http.StatusUnauthorized)

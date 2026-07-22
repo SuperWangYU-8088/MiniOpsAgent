@@ -2,6 +2,7 @@
 .env.*
 !.env.example
 
+.miniopsagent/
 .paicli/
 
 /paicli

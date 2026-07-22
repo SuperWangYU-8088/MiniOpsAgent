@@ -13,17 +13,16 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/itwanger/paicli-go/internal/agent"
-	"github.com/itwanger/paicli-go/internal/config"
-	"github.com/itwanger/paicli-go/internal/llm"
-	"github.com/itwanger/paicli-go/internal/rag"
-	"github.com/itwanger/paicli-go/internal/runtime"
-	"github.com/itwanger/paicli-go/internal/skill"
-	"github.com/itwanger/paicli-go/internal/snapshot"
-	"github.com/itwanger/paicli-go/internal/tools"
-	"github.com/itwanger/paicli-go/internal/tui"
-	"github.com/itwanger/paicli-go/internal/version"
-	"github.com/itwanger/paicli-go/internal/wechat"
+	"github.com/SuperWangYU-8088/MiniOpsAgent/internal/agent"
+	"github.com/SuperWangYU-8088/MiniOpsAgent/internal/config"
+	"github.com/SuperWangYU-8088/MiniOpsAgent/internal/llm"
+	"github.com/SuperWangYU-8088/MiniOpsAgent/internal/rag"
+	"github.com/SuperWangYU-8088/MiniOpsAgent/internal/runtime"
+	"github.com/SuperWangYU-8088/MiniOpsAgent/internal/skill"
+	"github.com/SuperWangYU-8088/MiniOpsAgent/internal/snapshot"
+	"github.com/SuperWangYU-8088/MiniOpsAgent/internal/tools"
+	"github.com/SuperWangYU-8088/MiniOpsAgent/internal/tui"
+	"github.com/SuperWangYU-8088/MiniOpsAgent/internal/version"
 )
 
 func main() {
@@ -43,8 +42,8 @@ func rootCommand() *cobra.Command {
 	var mode string
 
 	cmd := &cobra.Command{
-		Use:   "paicli",
-		Short: "PaiCLI Go Agent CLI",
+		Use:   "miniopsagent",
+		Short: "MiniOpsAgent terminal runtime",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if cwd != "" {
 				if err := os.Chdir(cwd); err != nil {
@@ -85,7 +84,7 @@ func rootCommand() *cobra.Command {
 	cmd.Flags().StringVar(&cwd, "cwd", "", "workspace directory")
 	cmd.Flags().StringVar(&mode, "mode", "", "run mode for --once or --plain: react, plan, team")
 	cmd.AddCommand(versionCommand(), doctorCommand(), indexCommand(), searchCommand(), graphCommand(),
-		serveCommand(), wechatCommand(), snapshotCommand())
+		serveCommand(), snapshotCommand())
 	return cmd
 }
 
@@ -118,10 +117,10 @@ func bootstrap(ctx context.Context) (*environment, error) {
 	if err := skillRegistry.Reload(); err != nil {
 		return nil, err
 	}
-	codeIndex := rag.NewIndex(filepath.Join(config.HomeDir(), ".paicli", "rag", "go-code-index.json"))
+	codeIndex := rag.NewIndex(filepath.Join(config.StateDir(), "rag", "code-index.json"))
 	_ = codeIndex.Load()
-	memoryStore := agent.NewMemoryStore(filepath.Join(config.HomeDir(), ".paicli", "memory", "long_term_memory.json"), project)
-	snapshots := snapshot.NewService(project, filepath.Join(config.HomeDir(), ".paicli", "snapshots"))
+	memoryStore := agent.NewMemoryStore(filepath.Join(config.StateDir(), "memory", "long_term_memory.json"), project)
+	snapshots := snapshot.NewService(project, filepath.Join(config.StateDir(), "snapshots"))
 	reg := tools.NewRegistry(project, tools.Options{
 		Config:        cfg,
 		RAG:           codeIndex,
@@ -147,7 +146,7 @@ func bootstrap(ctx context.Context) (*environment, error) {
 }
 
 func runPlain(ctx context.Context, env *environment, mode string) error {
-	fmt.Printf("PaiCLI Go %s (%s/%s). Type /exit to quit.\n", version.Version, env.Client.Provider(), env.Client.Model())
+	fmt.Printf("MiniOpsAgent %s (%s/%s). Type /exit to quit.\n", version.Version, env.Client.Provider(), env.Client.Model())
 	scanner := bufio.NewScanner(os.Stdin)
 	for {
 		fmt.Print("* ")
@@ -191,20 +190,23 @@ func doctorCommand() *cobra.Command {
 		RunE: func(cmd *cobra.Command, args []string) error {
 			cfg := config.Load()
 			providerCfg := cfg.Provider(cfg.DefaultProvider)
-			fmt.Printf("PaiCLI Go: %s\n", version.Version)
+			fmt.Printf("MiniOpsAgent: %s\n", version.Version)
 			fmt.Printf("CWD: %s\n", mustCwd())
+			fmt.Printf("State dir: %s\n", config.StateDir())
 			fmt.Printf("Provider: %s\n", cfg.DefaultProvider)
 			fmt.Printf("Model: %s\n", providerCfg.Model)
 			fmt.Printf("Base URL: %s\n", present(providerCfg.BaseURL != ""))
 			fmt.Printf("API key: %s\n", present(providerCfg.APIKey != ""))
+			fmt.Printf("MINIOPS_PROVIDER: %s\n", present(os.Getenv("MINIOPS_PROVIDER") != ""))
+			fmt.Printf("MINIOPS_RUNTIME_API_KEY: %s\n", present(os.Getenv("MINIOPS_RUNTIME_API_KEY") != ""))
 			fmt.Printf("SERPAPI_API_KEY: %s\n", present(os.Getenv("SERPAPI_API_KEY") != ""))
 			fmt.Printf("SEARXNG_BASE_URL: %s\n", present(os.Getenv("SEARXNG_BASE_URL") != ""))
-			if _, err := os.Stat(filepath.Join(config.HomeDir(), ".paicli", "mcp.json")); err == nil {
+			if _, err := os.Stat(filepath.Join(config.StateDir(), "mcp.json")); err == nil {
 				fmt.Println("MCP user config: present")
 			} else {
 				fmt.Println("MCP user config: missing")
 			}
-			if _, err := os.Stat(".paicli/mcp.json"); err == nil {
+			if _, err := os.Stat(".miniopsagent/mcp.json"); err == nil {
 				fmt.Println("MCP project config: present")
 			} else {
 				fmt.Println("MCP project config: missing")
@@ -223,7 +225,7 @@ func indexCommand() *cobra.Command {
 			if len(args) > 0 {
 				root = args[0]
 			}
-			idx := rag.NewIndex(filepath.Join(config.HomeDir(), ".paicli", "rag", "go-code-index.json"))
+			idx := rag.NewIndex(filepath.Join(config.StateDir(), "rag", "code-index.json"))
 			if err := idx.Build(root); err != nil {
 				return err
 			}
@@ -243,7 +245,7 @@ func searchCommand() *cobra.Command {
 		Short: "search code index",
 		Args:  cobra.MinimumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			idx := rag.NewIndex(filepath.Join(config.HomeDir(), ".paicli", "rag", "go-code-index.json"))
+			idx := rag.NewIndex(filepath.Join(config.StateDir(), "rag", "code-index.json"))
 			if err := idx.Load(); err != nil {
 				return err
 			}
@@ -262,7 +264,7 @@ func graphCommand() *cobra.Command {
 		Use:   "graph",
 		Short: "print indexed code relation graph",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			idx := rag.NewIndex(filepath.Join(config.HomeDir(), ".paicli", "rag", "go-code-index.json"))
+			idx := rag.NewIndex(filepath.Join(config.StateDir(), "rag", "code-index.json"))
 			if err := idx.Load(); err != nil {
 				return err
 			}
@@ -285,9 +287,9 @@ func serveCommand() *cobra.Command {
 				return err
 			}
 			defer env.Close()
-			key := os.Getenv("PAICLI_RUNTIME_API_KEY")
+			key := os.Getenv("MINIOPS_RUNTIME_API_KEY")
 			if key == "" {
-				return fmt.Errorf("PAICLI_RUNTIME_API_KEY is required")
+				return fmt.Errorf("MINIOPS_RUNTIME_API_KEY is required")
 			}
 			addr := fmt.Sprintf("127.0.0.1:%d", port)
 			fmt.Printf("Runtime API listening on http://%s\n", addr)
@@ -298,17 +300,13 @@ func serveCommand() *cobra.Command {
 	return cmd
 }
 
-func wechatCommand() *cobra.Command {
-	return wechat.Command(config.HomeDir())
-}
-
 func snapshotCommand() *cobra.Command {
 	cmd := &cobra.Command{Use: "snapshot", Short: "manage workspace snapshots"}
 	cmd.AddCommand(&cobra.Command{
 		Use:   "list",
 		Short: "list snapshots",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			svc := snapshot.NewService(mustCwd(), filepath.Join(config.HomeDir(), ".paicli", "snapshots"))
+			svc := snapshot.NewService(mustCwd(), filepath.Join(config.StateDir(), "snapshots"))
 			items, err := svc.List()
 			if err != nil {
 				return err
@@ -324,7 +322,7 @@ func snapshotCommand() *cobra.Command {
 		Short: "restore a snapshot",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			svc := snapshot.NewService(mustCwd(), filepath.Join(config.HomeDir(), ".paicli", "snapshots"))
+			svc := snapshot.NewService(mustCwd(), filepath.Join(config.StateDir(), "snapshots"))
 			return svc.Restore(args[0])
 		},
 	})

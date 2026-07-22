@@ -10,7 +10,7 @@ import (
 	"github.com/charmbracelet/lipgloss"
 	"github.com/charmbracelet/x/ansi"
 
-	"github.com/itwanger/paicli-go/internal/agent"
+	"github.com/SuperWangYU-8088/MiniOpsAgent/internal/agent"
 )
 
 func TestStripTerminalControlResponses(t *testing.T) {
@@ -101,7 +101,7 @@ func TestStatusBarStaysSingleLine(t *testing.T) {
 	for _, width := range []int{40, 80, 160} {
 		m := newModel(context.Background(), nil, Startup{
 			Model:      "deepseek-v4-pro",
-			CWD:        "/Users/itwanger/Documents/GitHub/paicli-go",
+			CWD:        "/workspace/miniopsagent",
 			MaxContext: 1000000,
 		})
 		m.width = width
@@ -116,8 +116,8 @@ func TestStatusBarStaysSingleLine(t *testing.T) {
 }
 
 func TestTruncateMiddle(t *testing.T) {
-	got := truncateMiddle("/Users/itwanger/Documents/GitHub/paicli-go", 18)
-	if got == "/Users/itwanger/Documents/GitHub/paicli-go" {
+	got := truncateMiddle("/workspace/miniopsagent", 18)
+	if got == "/workspace/miniopsagent" {
 		t.Fatal("expected long path to be truncated")
 	}
 	if len([]rune(got)) > 18 {
@@ -199,16 +199,16 @@ func TestViewKeepsInputInsideTerminalFrame(t *testing.T) {
 		t.Fatalf("input should stay in the fixed TUI frame, got:\n%s", plain)
 	}
 	lines := strings.Split(plain, "\n")
-	if last := strings.TrimSpace(lines[len(lines)-1]); !strings.HasPrefix(last, "YOLO DeepSeek V4 Pro") {
+	if last := strings.TrimSpace(lines[len(lines)-1]); !strings.HasPrefix(last, "OPS DeepSeek V4 Pro") {
 		t.Fatalf("status bar should be pinned to the last terminal row, got last line %q:\n%s", last, plain)
 	}
 	if gap := strings.TrimSpace(lines[len(lines)-2]); gap != "" {
 		t.Fatalf("input and status bar should be separated by a blank row, got %q:\n%s", gap, plain)
 	}
-	if count := strings.Count(plain, "YOLO DeepSeek V4 Pro"); count != 1 {
+	if count := strings.Count(plain, "OPS DeepSeek V4 Pro"); count != 1 {
 		t.Fatalf("status bar should render once, got %d occurrences:\n%s", count, plain)
 	}
-	for _, want := range []string{"PaiCLI", "DeepSeek V4 Pro", "What's ready", "PaiCLI Go，可以帮你"} {
+	for _, want := range []string{"MiniOpsAgent", "DeepSeek V4 Pro", "What's ready", "MiniOpsAgent，可以帮你"} {
 		if !strings.Contains(plain, want) {
 			t.Fatalf("view should contain %q, got:\n%s", want, plain)
 		}
@@ -326,9 +326,9 @@ func TestFormatEventContent(t *testing.T) {
 	toolResult := formatEventContent(agent.Event{
 		Type:    agent.EventToolResult,
 		Title:   "read_file",
-		Content: "PaiCLI Go",
+		Content: "MiniOpsAgent",
 	})
-	if !strings.Contains(toolResult, "Tool result: read_file") || !strings.Contains(toolResult, "PaiCLI Go") {
+	if !strings.Contains(toolResult, "Tool result: read_file") || !strings.Contains(toolResult, "MiniOpsAgent") {
 		t.Fatalf("tool result event not formatted correctly: %q", toolResult)
 	}
 }

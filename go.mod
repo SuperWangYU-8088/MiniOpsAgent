@@ -1,4 +1,4 @@
-module github.com/itwanger/paicli-go
+module github.com/SuperWangYU-8088/MiniOpsAgent
 
 go 1.26
 

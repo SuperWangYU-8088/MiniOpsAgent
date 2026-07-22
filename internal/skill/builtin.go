@@ -6,7 +6,7 @@ description: |
   All web access must go through this skill: search, fetch, login-required browsing,
   dynamic pages, social sites and browser fallback decisions.
 version: "1.0.0"
-author: PaiCLI
+author: MiniOpsAgent
 tags: [web, browser, fetch]
 ---
 

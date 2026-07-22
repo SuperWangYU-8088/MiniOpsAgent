@@ -178,8 +178,8 @@ func webFetch(ctx context.Context, rawURL string, maxChars int) (string, error) 
 		return "", fmt.Errorf("blocked URL scheme: %s", u.Scheme)
 	}
 	host := u.Hostname()
-	if ip := net.ParseIP(host); ip != nil && !ip.IsGlobalUnicast() {
-		return "", fmt.Errorf("blocked non-public IP: %s", host)
+	if err := validatePublicHost(ctx, host); err != nil {
+		return "", err
 	}
 	data, err := httpGet(ctx, rawURL, 5<<20)
 	if err != nil {
@@ -199,7 +199,7 @@ func httpGet(ctx context.Context, rawURL string, maxBytes int64) ([]byte, error)
 	if err != nil {
 		return nil, err
 	}
-	req.Header.Set("User-Agent", "PaiCLI-Go/0.1")
+	req.Header.Set("User-Agent", "MiniOpsAgent/0.1")
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		return nil, err
@@ -209,6 +209,47 @@ func httpGet(ctx context.Context, rawURL string, maxBytes int64) ([]byte, error)
 		return nil, fmt.Errorf("fetch failed: %s", resp.Status)
 	}
 	return io.ReadAll(io.LimitReader(resp.Body, maxBytes))
+}
+
+func validatePublicHost(ctx context.Context, host string) error {
+	// web_fetch is intentionally public-web only. Resolve hostnames before the
+	// request so SSRF attempts such as localhost, RFC1918 ranges, and metadata
+	// service aliases are rejected before http.Client follows the URL.
+	if host == "" {
+		return fmt.Errorf("blocked empty host")
+	}
+	lower := strings.ToLower(host)
+	if lower == "localhost" || strings.HasSuffix(lower, ".localhost") {
+		return fmt.Errorf("blocked local host: %s", host)
+	}
+	if ip := net.ParseIP(host); ip != nil {
+		if !isPublicIP(ip) {
+			return fmt.Errorf("blocked non-public IP: %s", host)
+		}
+		return nil
+	}
+	addrs, err := net.DefaultResolver.LookupIPAddr(ctx, host)
+	if err != nil {
+		return fmt.Errorf("resolve host %s: %w", host, err)
+	}
+	if len(addrs) == 0 {
+		return fmt.Errorf("resolve host %s: no addresses", host)
+	}
+	for _, addr := range addrs {
+		if !isPublicIP(addr.IP) {
+			return fmt.Errorf("blocked non-public resolved IP for %s: %s", host, addr.IP.String())
+		}
+	}
+	return nil
+}
+
+func isPublicIP(ip net.IP) bool {
+	return ip.IsGlobalUnicast() &&
+		!ip.IsPrivate() &&
+		!ip.IsLoopback() &&
+		!ip.IsLinkLocalMulticast() &&
+		!ip.IsLinkLocalUnicast() &&
+		!ip.IsUnspecified()
 }
 
 var scriptStyleRE = regexp.MustCompile(`(?is)<script[^>]*>.*?</script>|<style[^>]*>.*?</style>|<noscript[^>]*>.*?</noscript>`)

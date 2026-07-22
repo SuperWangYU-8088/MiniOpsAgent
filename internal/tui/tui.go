@@ -15,7 +15,7 @@ import (
 	"github.com/charmbracelet/lipgloss"
 	xansi "github.com/charmbracelet/x/ansi"
 
-	"github.com/itwanger/paicli-go/internal/agent"
+	"github.com/SuperWangYU-8088/MiniOpsAgent/internal/agent"
 )
 
 type Startup struct {
@@ -117,12 +117,12 @@ func newModel(ctx context.Context, ag *agent.Agent, startup Startup) model {
 		transcriptView: transcriptView,
 		width:          100,
 		height:         30,
-		mode:           "YOLO",
+		mode:           "OPS",
 		status:         "idle",
 		renderer:       renderer,
 		entries: []entry{{
 			Role:    "assistant",
-			Content: "你好！我是 PaiCLI Go，可以帮你处理代码、工具调用、搜索、MCP、Skill、RAG 和多 Agent 任务。",
+			Content: "你好！我是 MiniOpsAgent，可以帮你处理运维脚本、代码搜索、命令执行、MCP、Skill、RAG 和本地 Runtime 任务。",
 			Time:    time.Now(),
 		}},
 	}
@@ -425,7 +425,7 @@ func (m model) banner() string {
 		"  ██  ██  ",
 	}, "\n"))
 	info := lipgloss.JoinVertical(lipgloss.Left,
-		titleStyle.Render("PaiCLI π")+" "+mutedStyle.Render(m.startup.Version),
+		titleStyle.Render("MiniOpsAgent")+" "+mutedStyle.Render(m.startup.Version),
 		mutedStyle.Render(displayModelName(m.startup.Model)),
 		boldStyle.Render("MCP")+" "+mutedStyle.Render(fmt.Sprintf("%d ready · %d tools", m.startup.MCPReady, m.startup.MCPTools)),
 		boldStyle.Render("Skill")+" "+mutedStyle.Render(fmt.Sprintf("%d/%d enabled", m.startup.SkillsEnabled, m.startup.SkillsTotal)),
@@ -435,7 +435,7 @@ func (m model) banner() string {
 		sectionStyle.Render("What's ready") + "\n" +
 			"- ReAct · Plan · Multi-Agent\n" +
 			"- grep · RAG · Web · MCP · Skill\n" +
-			"- Runtime · Snapshot · WeChat")
+			"- Runtime · Snapshot · Audit")
 	return lipgloss.JoinHorizontal(lipgloss.Top, left, "  ", info, "  ", panel)
 }
 
@@ -1012,7 +1012,7 @@ func truncateMiddle(s string, width int) string {
 
 func slashHelp() string {
 	return strings.TrimSpace(`
-PaiCLI commands:
+MiniOpsAgent commands:
 
 - /plan <task>  Run Plan-and-Execute
 - /team <task>  Run Multi-Agent workflow
@@ -1021,11 +1021,10 @@ PaiCLI commands:
 
 CLI commands outside the TUI:
 
-- paicli doctor
-- paicli index
-- paicli search <query>
-- paicli serve --port 8080
-- paicli wechat status
+- miniopsagent doctor
+- miniopsagent index
+- miniopsagent search <query>
+- miniopsagent serve --port 8080
 `)
 }
 

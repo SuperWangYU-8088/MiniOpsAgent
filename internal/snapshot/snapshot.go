@@ -145,7 +145,7 @@ func shouldSkip(rel string) bool {
 	parts := strings.Split(filepath.ToSlash(rel), "/")
 	for _, p := range parts {
 		switch p {
-		case ".git", ".paicli", "node_modules", "target", "dist", "build", "coverage", "vendor":
+		case ".git", ".miniopsagent", ".paicli", "node_modules", "target", "dist", "build", "coverage", "vendor":
 			return true
 		}
 	}

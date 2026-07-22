@@ -58,7 +58,7 @@ func (i *Index) Build(root string) error {
 		}
 		if d.IsDir() {
 			switch d.Name() {
-			case ".git", ".paicli", "node_modules", "target", "dist", "build", "coverage", "vendor":
+			case ".git", ".miniopsagent", ".paicli", "node_modules", "target", "dist", "build", "coverage", "vendor":
 				return filepath.SkipDir
 			}
 			return nil

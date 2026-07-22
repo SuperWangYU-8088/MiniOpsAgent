@@ -1,6 +1,8 @@
 package tools
 
 import (
+	"context"
+	"net"
 	"strings"
 	"testing"
 )
@@ -32,5 +34,19 @@ func TestParseDuckDuckGoHTML(t *testing.T) {
 	}
 	if rows[0].Content != "一个技术作者的介绍" {
 		t.Fatalf("content = %q", rows[0].Content)
+	}
+}
+
+func TestValidatePublicHostRejectsLocalhost(t *testing.T) {
+	if err := validatePublicHost(context.Background(), "localhost"); err == nil {
+		t.Fatal("expected localhost to be rejected")
+	}
+}
+
+func TestIsPublicIPRejectsPrivateRanges(t *testing.T) {
+	for _, raw := range []string{"127.0.0.1", "10.0.0.5", "172.16.1.1", "192.168.1.10"} {
+		if isPublicIP(net.ParseIP(raw)) {
+			t.Fatalf("expected %s to be treated as non-public", raw)
+		}
 	}
 }
